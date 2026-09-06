@@ -1,0 +1,13 @@
+# Data & weights
+*.npy
+*.mat
+*.h5
+weights/
+
+# Logs —
+logs/*
+!logs/training_log.csv
+
+# Python cache
+__pycache__/
+*.pyc
