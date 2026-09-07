@@ -1,200 +1,211 @@
-"""
-Resonance - Data Preprocessor v2
-==================================
-Loads channels_o1_28.npy  (N, 128, 256, 2)  float32
-Fixes NaNs/Infs, normalizes, augments, and saves train/val/test splits.
+"""Build reproducible multi-scenario splits without copying CSI arrays."""
 
-Run:
-    python preprocess_2.py
-"""
-
-import numpy as np
-from sklearn.model_selection import train_test_split
+import argparse
+import json
+import math
 import os
 
-# ══════════════════════════════════════════════════════
-#  CONFIG
-# ══════════════════════════════════════════════════════
-INPUT_NPY      = r"D:\ML Models\scenarios\channels_o1_28.npy"
-OUTPUT_DIR     = r"D:\ML Models\scenarios\splits"
-
-TARGET_H       = 128    # antennas
-TARGET_W       = 256    # subcarriers
-
-NUM_AUGMENTS   = 0      # augmented copies per original sample
-NOISE_LEVEL    = 0.05   # std of augmentation noise
-
-TEST_SIZE      = 0.15
-VAL_SIZE       = 0.15   # fraction of remaining after test split
-RANDOM_SEED    = 42
-# ══════════════════════════════════════════════════════
+import numpy as np
 
 
-def load_and_validate(path):
-    print(f"\n[1/5] Loading data...")
-    print(f"      Path: {path}")
-
-    raw = np.load(path, allow_pickle=False)   # plain float32, no pickle needed
-
-    print(f"      Raw shape : {raw.shape}  dtype: {raw.dtype}")
-
-    # Accept either (N, A, S, 2) or (N, A, S) complex
-    if raw.ndim == 3 and np.iscomplexobj(raw):
-        print(f"      Converting complex → I/Q...")
-        raw = np.stack([np.real(raw), np.imag(raw)], axis=-1).astype(np.float32)
-    elif raw.ndim == 4 and raw.shape[-1] == 2:
-        raw = raw.astype(np.float32)
-    else:
-        raise ValueError(f"Unexpected shape {raw.shape}. Expected (N,A,S,2) or (N,A,S) complex.")
-
-    return raw
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_ROOT = os.environ.get("LOCANDKEY_DATA_ROOT", os.path.join(PROJECT_DIR, "data"))
+SPLITS_DIR = os.environ.get("LOCANDKEY_SPLITS_DIR", os.path.join(DATA_ROOT, "splits"))
+EXPECTED_SAMPLE_SHAPE = (128, 256, 2)
 
 
-def fix_nans(data):
-    print(f"\n[2/5] Checking data quality...")
-
-    nan_count = np.isnan(data).sum()
-    inf_count = np.isinf(data).sum()
-    print(f"      NaNs : {nan_count:,}")
-    print(f"      Infs : {inf_count:,}")
-
-    if nan_count > 0 or inf_count > 0:
-        # Replace NaN/Inf with 0 — these are users with no signal (blocked paths)
-        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-        print(f"      ✅ Replaced NaN/Inf with 0")
-
-    # Drop samples that are entirely zero (users with no paths at all)
-    energy = np.sum(data**2, axis=(1, 2, 3))
-    valid  = energy > 1e-10
-    n_dropped = (~valid).sum()
-    if n_dropped > 0:
-        data = data[valid]
-        print(f"      Dropped {n_dropped:,} zero-energy samples")
-
-    print(f"      Clean samples: {data.shape[0]:,}")
-    return data
+def discover_channels(data_root):
+    generated = os.path.join(data_root, "generated")
+    if not os.path.isdir(generated):
+        raise FileNotFoundError(f"Generated data directory not found: {generated}")
+    channels = {}
+    for entry in sorted(os.scandir(generated), key=lambda item: item.name):
+        path = os.path.join(entry.path, "channels.npy")
+        if entry.is_dir() and os.path.isfile(path):
+            channels[entry.name] = path
+    if not channels:
+        raise FileNotFoundError(f"No scenario channels.npy files found under {generated}")
+    return channels
 
 
-def resize(data, target_h, target_w):
-    """Pad or truncate spatial dims to (N, target_h, target_w, 2)."""
-    _, h, w, _ = data.shape
-    if h == target_h and w == target_w:
-        return data
+def validate_channels(path, chunk_size):
+    data = np.load(path, mmap_mode="r", allow_pickle=False)
+    if data.ndim != 4 or data.shape[1:] != EXPECTED_SAMPLE_SHAPE:
+        raise ValueError(f"Unexpected shape {data.shape} in {path}")
+    if data.dtype != np.float32:
+        raise ValueError(f"Unexpected dtype {data.dtype} in {path}; expected float32")
 
-    print(f"\n      Resizing {h}×{w} → {target_h}×{target_w}")
-    data = data[:, :target_h, :target_w, :]
-    ph   = max(0, target_h - data.shape[1])
-    pw   = max(0, target_w - data.shape[2])
-    if ph or pw:
-        data = np.pad(data, ((0,0),(0,ph),(0,pw),(0,0)))
-    return data
+    valid = []
+    nonfinite_count = 0
+    zero_count = 0
+    for start in range(0, len(data), chunk_size):
+        chunk = np.asarray(data[start:start + chunk_size])
+        finite = np.isfinite(chunk).all(axis=(1, 2, 3))
+        energy = np.sum(chunk * chunk, axis=(1, 2, 3), dtype=np.float64)
+        nonfinite_count += int((~finite).sum())
+        zero_count += int((finite & (energy == 0)).sum())
+        keep = finite & (energy > 0)
+        valid.append(np.arange(start, start + len(chunk), dtype=np.int64)[keep])
 
-
-def normalize(data):
-    """
-    Per-sample L2 normalization on the complex channel.
-    Done on the combined I/Q magnitude so phase is preserved.
-    """
-    print(f"\n[3/5] Normalizing...")
-
-    # Compute per-sample norm: sqrt(sum of I^2 + Q^2)
-    norm = np.sqrt(np.sum(data**2, axis=(1, 2, 3), keepdims=True))
-
-    # Avoid division by zero (already removed zero samples, but just in case)
-    norm = np.maximum(norm, 1e-10)
-    data = data / norm
-
-    print(f"      ✅ Per-sample L2 normalization applied")
-    print(f"      Sample norm check (should be ~1.0): "
-          f"{np.sqrt(np.sum(data[0]**2)):.4f}")
-
-    return data
+    if nonfinite_count:
+        raise ValueError(f"{path} contains {nonfinite_count} samples with NaN or Inf")
+    return data, np.concatenate(valid), zero_count
 
 
-def augment(data, num_augments, noise_level):
-    """
-    Augmentation strategies:
-      1. Additive Gaussian noise (simulates varying SNR)
-      2. Random amplitude scaling ±15% (simulates path loss variation)
-      3. Subcarrier axis flip (frequency symmetry)
-      4. Antenna axis flip (spatial symmetry)
-    """
-    print(f"\n[4/5] Augmenting  ({num_augments}× per sample)...")
+def create_splits(data_root, output_dir, seed=42, train_ratio=0.70, val_ratio=0.15, chunk_size=32):
+    if train_ratio <= 0 or val_ratio <= 0 or train_ratio + val_ratio >= 1:
+        raise ValueError("Split ratios must be positive and leave room for the test split")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
 
-    augmented = [data]   # keep originals
+    split_arrays = {}
+    summary = {
+        "version": 1,
+        "seed": seed,
+        "ratios": {"train": train_ratio, "validation": val_ratio, "test": 1 - train_ratio - val_ratio},
+        "sample_shape": list(EXPECTED_SAMPLE_SHAPE),
+        "scenarios": {},
+        "totals": {"source": 0, "usable": 0, "train": 0, "validation": 0, "test": 0},
+    }
 
-    for i in range(num_augments):
-        batch = data.copy()
+    for scenario_number, (scenario, path) in enumerate(discover_channels(data_root).items()):
+        print(f"Validating {scenario}: {path}")
+        data, valid_indices, zero_count = validate_channels(path, chunk_size)
+        indices = np.random.default_rng(seed + scenario_number).permutation(valid_indices)
+        train_end = int(len(indices) * train_ratio)
+        val_end = train_end + int(len(indices) * val_ratio)
+        scenario_splits = {
+            "train": indices[:train_end],
+            "validation": indices[train_end:val_end],
+            "test": indices[val_end:],
+        }
+        assert not np.intersect1d(scenario_splits["train"], scenario_splits["validation"]).size
+        assert not np.intersect1d(scenario_splits["train"], scenario_splits["test"]).size
+        assert not np.intersect1d(scenario_splits["validation"], scenario_splits["test"]).size
 
-        if i % 3 == 0:
-            # Strategy 1: AWGN noise
-            noise  = np.random.normal(0, noise_level, batch.shape).astype(np.float32)
-            batch  = batch + noise
+        counts = {name: len(values) for name, values in scenario_splits.items()}
+        for name, values in scenario_splits.items():
+            split_arrays[f"{name}__{scenario}"] = values
+            summary["totals"][name] += counts[name]
+        summary["totals"]["source"] += len(data)
+        summary["totals"]["usable"] += len(indices)
+        summary["scenarios"][scenario] = {
+            "path": os.path.relpath(path, data_root).replace("\\", "/"),
+            "source_samples": len(data),
+            "usable_samples": len(indices),
+            "dropped_zero_energy": zero_count,
+            "splits": counts,
+        }
+        print(f"  usable={len(indices):,} train={counts['train']:,} val={counts['validation']:,} test={counts['test']:,}")
 
-        elif i % 3 == 1:
-            # Strategy 2: Amplitude scaling + light noise
-            scale  = np.random.uniform(0.85, 1.15, (len(batch),1,1,1)).astype(np.float32)
-            noise  = np.random.normal(0, noise_level*0.5, batch.shape).astype(np.float32)
-            batch  = batch * scale + noise
-
-        else:
-            # Strategy 3: Spatial flip along subcarrier axis
-            batch  = np.flip(batch, axis=2).copy()
-            noise  = np.random.normal(0, noise_level*0.3, batch.shape).astype(np.float32)
-            batch  = batch + noise
-
-        augmented.append(batch.astype(np.float32))
-
-    result = np.concatenate(augmented, axis=0)
-
-    # Shuffle so augmented copies aren't all grouped together
-    idx    = np.random.permutation(len(result))
-    result = result[idx]
-
-    print(f"      Original : {data.shape[0]:>7,} samples")
-    print(f"      Augmented: {result.shape[0]:>7,} samples")
-    return result
-
-
-def split_and_save(data, output_dir, test_size, val_size, seed):
-    print(f"\n[5/5] Splitting and saving...")
     os.makedirs(output_dir, exist_ok=True)
+    indices_path = os.path.join(output_dir, "split_indices.npz")
+    summary_path = os.path.join(output_dir, "split_summary.json")
+    indices_tmp = indices_path + ".tmp"
+    summary_tmp = summary_path + ".tmp"
+    with open(indices_tmp, "wb") as handle:
+        np.savez_compressed(handle, **split_arrays)
+    with open(summary_tmp, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
+    os.replace(indices_tmp, indices_path)
+    os.replace(summary_tmp, summary_path)
+    print(f"Saved split indices: {indices_path}")
+    print(f"Saved split summary: {summary_path}")
+    print(f"Totals: {summary['totals']}")
+    return summary
 
-    X_train, X_temp  = train_test_split(data,   test_size=test_size, random_state=seed)
-    X_val,   X_test  = train_test_split(X_temp, test_size=0.5,       random_state=seed)
 
-    splits = {'X_train': X_train, 'X_val': X_val, 'X_test': X_test}
-
-    for name, arr in splits.items():
-        path = os.path.join(output_dir, f"{name}.npy")
-        np.save(path, arr)
-        mb   = os.path.getsize(path) / 1e6
-        print(f"      {name:8s}: {arr.shape[0]:>7,} samples  {arr.shape}  {mb:.1f} MB  → {path}")
-
-    return splits
+def load_split_files(data_root, split_dir):
+    with open(os.path.join(split_dir, "split_summary.json"), encoding="utf-8") as handle:
+        summary = json.load(handle)
+    indices = np.load(os.path.join(split_dir, "split_indices.npz"), allow_pickle=False)
+    channels = {
+        name: np.load(os.path.join(data_root, details["path"]), mmap_mode="r", allow_pickle=False)
+        for name, details in summary["scenarios"].items()
+    }
+    return summary, indices, channels
 
 
-def main():
-    print("\n" + "═"*60)
-    print("  Resonance — Data Preprocessor")
-    print("═"*60)
+def normalize_batch(batch):
+    batch = np.asarray(batch, dtype=np.float32)
+    norm = np.sqrt(np.sum(batch * batch, axis=(1, 2, 3), keepdims=True, dtype=np.float64)).astype(np.float32)
+    return batch / np.maximum(norm, np.float32(1e-10))
 
-    data = load_and_validate(INPUT_NPY)
-    data = fix_nans(data)
-    data = resize(data, TARGET_H, TARGET_W)
-    data = normalize(data)
-    data = augment(data, NUM_AUGMENTS, NOISE_LEVEL)
-    splits = split_and_save(data, OUTPUT_DIR, TEST_SIZE, VAL_SIZE, RANDOM_SEED)
 
-    print(f"\n{'═'*60}")
-    print(f"  ✅  Preprocessing complete!")
-    print(f"  Train : {splits['X_train'].shape}")
-    print(f"  Val   : {splits['X_val'].shape}")
-    print(f"  Test  : {splits['X_test'].shape}")
-    print(f"  Input shape for model: {splits['X_train'].shape[1:]}")
-    print(f"{'═'*60}\n")
-    print(f"  Next step → update model.py then run train.py")
+def add_awgn(batch, snr_db, rng):
+    snr_db = np.asarray(snr_db, dtype=np.float32).reshape(-1, 1, 1, 1)
+    power = np.mean(batch[..., 0] ** 2 + batch[..., 1] ** 2, axis=(1, 2), keepdims=True)[..., None]
+    noise_std = np.sqrt(power / (2.0 * np.power(10.0, snr_db / 10.0)))
+    noise = rng.normal(size=batch.shape).astype(np.float32) * noise_std.astype(np.float32)
+    return batch + noise
+
+
+def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=False,
+                      snr_min_db=-10.0, snr_max_db=30.0, fixed_snr_db=None, max_samples=None):
+    import tensorflow as tf
+
+    summary, indices_file, channels = load_split_files(data_root, split_dir)
+    scenario_names = list(summary["scenarios"])
+    references = []
+    for scenario_id, scenario in enumerate(scenario_names):
+        values = indices_file[f"{split}__{scenario}"]
+        references.append(np.column_stack((np.full(len(values), scenario_id, dtype=np.int64), values)))
+    indices_file.close()
+    references = np.concatenate(references)
+    if max_samples and max_samples < len(references):
+        selected = np.random.default_rng(seed).permutation(len(references))[:max_samples]
+        references = references[selected]
+
+    class CSISequence(tf.keras.utils.Sequence):
+        def __init__(self):
+            self.references = references
+            self.channels = channels
+            self.scenario_names = scenario_names
+            self.batch_size = batch_size
+            self.seed = seed
+            self.shuffle = shuffle
+            self.epoch = 0
+            self.order = np.arange(len(references))
+            if shuffle:
+                self.order = np.random.default_rng(seed).permutation(self.order)
+
+        def __len__(self):
+            return math.ceil(len(self.references) / self.batch_size)
+
+        def __getitem__(self, batch_number):
+            positions = self.order[batch_number * self.batch_size:(batch_number + 1) * self.batch_size]
+            batch_refs = self.references[positions]
+            clean = np.empty((len(batch_refs),) + EXPECTED_SAMPLE_SHAPE, dtype=np.float32)
+            for scenario_id in np.unique(batch_refs[:, 0]):
+                destinations = np.where(batch_refs[:, 0] == scenario_id)[0]
+                scenario = self.scenario_names[int(scenario_id)]
+                clean[destinations] = self.channels[scenario][batch_refs[destinations, 1]]
+            clean = normalize_batch(clean)
+            noise_epoch = self.epoch if fixed_snr_db is None else 0
+            rng = np.random.default_rng(self.seed + noise_epoch * 1_000_003 + batch_number)
+            snr = (rng.uniform(snr_min_db, snr_max_db, len(clean)) if fixed_snr_db is None
+                   else np.full(len(clean), fixed_snr_db))
+            return add_awgn(clean, snr, rng), clean
+
+        def on_epoch_end(self):
+            self.epoch += 1
+            if self.shuffle:
+                self.order = np.random.default_rng(self.seed + self.epoch).permutation(len(self.references))
+
+    return CSISequence()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Create memory-mapped multi-scenario CSI splits.")
+    parser.add_argument("--data-root", default=DATA_ROOT)
+    parser.add_argument("--output-dir", default=SPLITS_DIR)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--train-ratio", type=float, default=0.70)
+    parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument("--chunk-size", type=int, default=32)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    create_splits(args.data_root, args.output_dir, args.seed, args.train_ratio, args.val_ratio, args.chunk_size)

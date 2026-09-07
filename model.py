@@ -87,20 +87,8 @@ def attention_gate(x, g, inter_channels):
 #  2. LOSS FUNCTION
 # ══════════════════════════════════════════════════════
 
-def resonance_loss(lambda_phys=0.10, lambda_spec=0.10, lambda_mag=0.05):
-    """
-    Multi-component loss:
-
-      L = NMSE                          (reconstruction accuracy)
-        + lambda_phys × physics_penalty (spatial antenna correlation)
-        + lambda_spec × spectral_loss   (frequency domain accuracy)
-        + lambda_mag  × magnitude_loss  (channel magnitude accuracy)
-
-    Args:
-        lambda_phys : weight for physics (antenna correlation) term
-        lambda_spec : weight for spectral (FFT domain) term
-        lambda_mag  : weight for magnitude term
-    """
+def resonance_loss(lambda_mag=0.05):
+    """Normalized reconstruction error with a small magnitude term."""
     def loss(y_true, y_pred):
 
         # ── Component 1: NMSE (core accuracy) ──────────────────
@@ -108,32 +96,7 @@ def resonance_loss(lambda_phys=0.10, lambda_spec=0.10, lambda_mag=0.05):
         signal_power = tf.reduce_mean(tf.square(y_true))
         nmse         = mse / (signal_power + 1e-8)
 
-        # ── Component 2: Physics — antenna spatial correlation ──
-        # Adjacent antennas should have correlated channels (physics of UPA arrays)
-        # Axis 1 = antenna dimension
-        true_diff    = y_true[:, 1:, :, :] - y_true[:, :-1, :, :]
-        pred_diff    = y_pred[:, 1:, :, :] - y_pred[:, :-1, :, :]
-        physics_loss = tf.reduce_mean(tf.square(true_diff - pred_diff))
-
-        # ── Component 3: Spectral loss (FFT domain) ─────────────
-        # Convert I/Q back to complex: shape (batch, antennas, subcarriers)
-        true_complex = tf.cast(y_true[..., 0], tf.complex64) + \
-                       1j * tf.cast(y_true[..., 1], tf.complex64)
-        pred_complex = tf.cast(y_pred[..., 0], tf.complex64) + \
-                       1j * tf.cast(y_pred[..., 1], tf.complex64)
-
-        # FFT along subcarrier axis → time domain impulse response
-        true_fft     = tf.signal.fft(true_complex)
-        pred_fft     = tf.signal.fft(pred_complex)
-
-        # L2 error in FFT domain (both real and imag parts)
-        fft_error    = tf.abs(true_fft - pred_fft)
-        spec_loss    = tf.reduce_mean(tf.square(fft_error))
-        spec_norm    = tf.reduce_mean(tf.square(tf.abs(true_fft))) + 1e-8
-        spec_loss    = spec_loss / spec_norm
-
-        # ── Component 4: Magnitude loss ──────────────────────────
-        # |H_true| vs |H_pred| — ensures amplitude accuracy
+        # Magnitude accuracy matters for later CSI quantization.
         true_mag     = tf.sqrt(tf.square(y_true[..., 0]) +
                                tf.square(y_true[..., 1]) + 1e-8)
         pred_mag     = tf.sqrt(tf.square(y_pred[..., 0]) +
@@ -141,12 +104,7 @@ def resonance_loss(lambda_phys=0.10, lambda_spec=0.10, lambda_mag=0.05):
         mag_loss     = tf.reduce_mean(tf.square(true_mag - pred_mag)) / \
                        (tf.reduce_mean(tf.square(true_mag)) + 1e-8)
 
-        total = (nmse
-                 + lambda_phys * physics_loss
-                 + lambda_spec * spec_loss
-                 + lambda_mag  * mag_loss)
-
-        return total
+        return nmse + lambda_mag * mag_loss
 
     return loss
 

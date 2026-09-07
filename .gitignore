@@ -3,6 +3,10 @@
 *.mat
 *.h5
 weights/
+data/deepmimo/
+data/generated/
+data/splits/
+visualizations/smoke/
 
 # Logs —
 logs/*
