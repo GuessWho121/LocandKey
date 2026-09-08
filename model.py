@@ -1,217 +1,122 @@
-"""
-Resonance - Model Architecture v2
-===================================
-ConvNeXt U-Net with:
-  - Attention Gates in decoder (focus on relevant channel features)
-  - CBAM channel attention in bottleneck (what to amplify)
-  - Multi-scale loss (accuracy at every resolution)
-  - Spectral loss (frequency domain accuracy)
-  - Physics-informed spatial correlation penalty
+"""LocandKey ConvNeXt U-Net. Tensors use (batch, 2, antennas, subcarriers)."""
 
-Input  : (batch, 128, 256, 2)  — 128 antennas × 256 subcarriers × I/Q
-Output : (batch, 128, 256, 2)  — denoised channel estimate
-"""
-
-import tensorflow as tf
-from tensorflow.keras import layers, models
-
-# ══════════════════════════════════════════════════════
-#  1. BUILDING BLOCKS
-# ══════════════════════════════════════════════════════
-
-def convnext_block(x, dim):
-    """
-    ConvNeXt block: large-kernel depthwise conv + inverted bottleneck.
-    Captures long-range spatial correlations across antennas/subcarriers.
-    """
-    shortcut = x
-    x = layers.DepthwiseConv2D(kernel_size=7, padding='same', use_bias=False)(x)
-    x = layers.LayerNormalization(epsilon=1e-6)(x)
-    x = layers.Conv2D(dim * 4, kernel_size=1)(x)
-    x = layers.Activation('gelu')(x)
-    x = layers.Conv2D(dim, kernel_size=1)(x)
-    # ← ADD THIS: project shortcut if channel count differs
-    if shortcut.shape[-1] != dim:
-        shortcut = layers.Conv2D(dim, kernel_size=1, use_bias=False)(shortcut)
-    x = layers.Add()([shortcut, x])
-    return x
+import torch
+from torch import nn
 
 
-def cbam_channel_attention(x, reduction=4):
-    """
-    CBAM Channel Attention: learns WHICH feature maps matter most.
-    Helps the bottleneck focus on dominant propagation modes.
-    """
-    channels = x.shape[-1]
-    # Global average + max pooling
-    avg = layers.GlobalAveragePooling2D(keepdims=True)(x)
-    mx  = layers.GlobalMaxPooling2D(keepdims=True)(x)
+class ChannelNorm(nn.LayerNorm):
+    """Match Keras LayerNormalization over channels, independently per pixel."""
 
-    # Shared MLP
-    dense1 = layers.Dense(max(channels // reduction, 1), activation='relu')
-    dense2 = layers.Dense(channels)
+    def __init__(self, channels):
+        super().__init__(channels, eps=1e-6)
 
-    avg = dense2(dense1(avg))
-    mx  = dense2(dense1(mx))
-
-    scale = layers.Activation('sigmoid')(layers.Add()([avg, mx]))
-    return layers.Multiply()([x, scale])
+    def forward(self, x):
+        return super().forward(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
-def attention_gate(x, g, inter_channels):
-    """
-    Attention Gate: lets the decoder selectively focus on encoder features.
-    g = gating signal from decoder (coarser, deeper)
-    x = encoder skip connection (finer, shallower)
+class ConvNeXtBlock(nn.Module):
+    def __init__(self, channels, dim):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, 7, padding=3, groups=channels, bias=False),
+            ChannelNorm(channels), nn.Conv2d(channels, dim * 4, 1),
+            nn.GELU(), nn.Conv2d(dim * 4, dim, 1),
+        )
+        self.shortcut = nn.Identity() if channels == dim else nn.Conv2d(channels, dim, 1, bias=False)
 
-    Physically: emphasises antenna/subcarrier regions with strong signal paths
-    while suppressing noise-dominated regions.
-    """
-    # Match spatial dims with 1×1 convs
-    theta_x = layers.Conv2D(inter_channels, kernel_size=1, use_bias=False)(x)
-    phi_g   = layers.Conv2D(inter_channels, kernel_size=1, use_bias=False)(g)
-
-    # If spatial dims differ, upsample g to match x
-    if theta_x.shape[1] != phi_g.shape[1] or theta_x.shape[2] != phi_g.shape[2]:
-        phi_g = layers.UpSampling2D(size=(
-            theta_x.shape[1] // phi_g.shape[1],
-            theta_x.shape[2] // phi_g.shape[2]
-        ))(phi_g)
-
-    add   = layers.Activation('relu')(layers.Add()([theta_x, phi_g]))
-    psi   = layers.Conv2D(1, kernel_size=1, activation='sigmoid')(add)
-    return layers.Multiply()([x, psi])
+    def forward(self, x):
+        return self.shortcut(x) + self.block(x)
 
 
-# ══════════════════════════════════════════════════════
-#  2. LOSS FUNCTION
-# ══════════════════════════════════════════════════════
+class ChannelAttention(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        self.mlp = nn.Sequential(nn.Conv2d(channels, max(channels // reduction, 1), 1),
+                                 nn.ReLU(), nn.Conv2d(max(channels // reduction, 1), channels, 1))
 
-def resonance_loss(lambda_mag=0.05):
-    """Normalized reconstruction error with a small magnitude term."""
-    def loss(y_true, y_pred):
-
-        # ── Component 1: NMSE (core accuracy) ──────────────────
-        mse          = tf.reduce_mean(tf.square(y_true - y_pred))
-        signal_power = tf.reduce_mean(tf.square(y_true))
-        nmse         = mse / (signal_power + 1e-8)
-
-        # Magnitude accuracy matters for later CSI quantization.
-        true_mag     = tf.sqrt(tf.square(y_true[..., 0]) +
-                               tf.square(y_true[..., 1]) + 1e-8)
-        pred_mag     = tf.sqrt(tf.square(y_pred[..., 0]) +
-                               tf.square(y_pred[..., 1]) + 1e-8)
-        mag_loss     = tf.reduce_mean(tf.square(true_mag - pred_mag)) / \
-                       (tf.reduce_mean(tf.square(true_mag)) + 1e-8)
-
-        return nmse + lambda_mag * mag_loss
-
-    return loss
+    def forward(self, x):
+        scale = self.mlp(x.mean((2, 3), keepdim=True)) + self.mlp(x.amax((2, 3), keepdim=True))
+        return x * scale.sigmoid()
 
 
-# ══════════════════════════════════════════════════════
-#  3. MODEL BUILDER
-# ══════════════════════════════════════════════════════
+class AttentionGate(nn.Module):
+    def __init__(self, channels, inter_channels):
+        super().__init__()
+        self.theta = nn.Conv2d(channels, inter_channels, 1, bias=False)
+        self.phi = nn.Conv2d(channels, inter_channels, 1, bias=False)
+        self.psi = nn.Conv2d(inter_channels, 1, 1)
+
+    def forward(self, x, g):
+        return x * self.psi(torch.relu(self.theta(x) + self.phi(g))).sigmoid()
+
+
+class ResonanceModel(nn.Module):
+    def __init__(self, input_shape=(128, 256, 2)):
+        super().__init__()
+        if len(input_shape) != 3 or input_shape[2] != 2 or any(n <= 0 or n % 16 for n in input_shape[:2]):
+            raise ValueError("input_shape must be (height, width, 2), with positive multiples of 16")
+        self.input_shape = tuple(input_shape)
+        self.encoder = nn.ModuleList()
+        for cin, cout, kernel in ((2, 32, 4), (32, 64, 2), (64, 128, 2)):
+            self.encoder.append(nn.Sequential(nn.Conv2d(cin, cout, kernel, stride=2, padding=1 if kernel == 4 else 0),
+                                              ChannelNorm(cout), ConvNeXtBlock(cout, cout)))
+        self.bottleneck = nn.Sequential(nn.Conv2d(128, 256, 2, stride=2), ChannelNorm(256),
+                                        ConvNeXtBlock(256, 256), ConvNeXtBlock(256, 256), ChannelAttention(256))
+        self.ups = nn.ModuleList()
+        self.gates = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+        for cin, cout in ((256, 128), (128, 64), (64, 32)):
+            self.ups.append(nn.Sequential(nn.ConvTranspose2d(cin, cout, 2, stride=2), ChannelNorm(cout)))
+            self.gates.append(AttentionGate(cout, cout // 2))
+            self.decoder.append(ConvNeXtBlock(cout * 2, cout))
+        self.final = nn.Sequential(nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1), ChannelNorm(16), nn.GELU())
+        self.output = nn.Conv2d(16, 2, 1)
+
+    def forward(self, x):
+        if x.ndim != 4 or tuple(x.shape[1:]) != (2, *self.input_shape[:2]):
+            raise ValueError(f"Expected (N, 2, {self.input_shape[0]}, {self.input_shape[1]}), got {tuple(x.shape)}")
+        skips = []
+        for encoder in self.encoder:
+            x = encoder(x)
+            skips.append(x)
+        x = self.bottleneck(x)
+        for up, gate, decoder, skip in zip(self.ups, self.gates, self.decoder, reversed(skips)):
+            x = up(x)
+            x = decoder(torch.cat((x, gate(skip, x)), dim=1))
+        x = self.final(x)
+        # Keep the final reconstruction and small normalized CSI losses in float32.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            return self.output(x.float())
+
 
 def build_resonance_model(input_shape=(128, 256, 2)):
-    """
-    ConvNeXt U-Net with Attention Gates and CBAM.
-    Encoder: progressively extracts multi-scale channel features
-    Bottleneck: CBAM attention highlights dominant propagation modes
-    Decoder: attention-gated skip connections for precise reconstruction
-    Args:
-        input_shape : (antennas, subcarriers, 2)
-    Returns:
-        tf.keras.Model
-    """
-    inputs = layers.Input(shape=input_shape)
+    return ResonanceModel(input_shape)
 
-    # ── ENCODER ────────────────────────────────────────
-    x    = layers.Conv2D(32, kernel_size=4, strides=2, padding='same')(inputs)
-    x    = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc1 = convnext_block(x, 32)                          # (64, 128, 32)
-
-    x    = layers.Conv2D(64, kernel_size=2, strides=2, padding='same')(enc1)
-    x    = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc2 = convnext_block(x, 64)                          # (32, 64, 64)
-
-    x    = layers.Conv2D(128, kernel_size=2, strides=2, padding='same')(enc2)
-    x    = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc3 = convnext_block(x, 128)                         # (16, 32, 128)
-
-    # ── BOTTLENECK ─────────────────────────────────────
-    x = layers.Conv2D(256, kernel_size=2, strides=2, padding='same')(enc3)
-    x = layers.LayerNormalization(epsilon=1e-6)(x)
-    x = convnext_block(x, 256)
-    x = convnext_block(x, 256)
-    x = cbam_channel_attention(x, reduction=4)            # (8, 16, 256)
-
-    # ── DECODER ────────────────────────────────────────
-    # Stage 1
-    x        = layers.Conv2DTranspose(128, kernel_size=2, strides=2, padding='same')(x)
-    x        = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc3_att = attention_gate(enc3, x, inter_channels=64)
-    x        = layers.Concatenate()([x, enc3_att])
-    x        = convnext_block(x, 128)                     # (16, 32, 128)
-
-    # Stage 2
-    x        = layers.Conv2DTranspose(64, kernel_size=2, strides=2, padding='same')(x)
-    x        = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc2_att = attention_gate(enc2, x, inter_channels=32)
-    x        = layers.Concatenate()([x, enc2_att])
-    x        = convnext_block(x, 64)                      # (32, 64, 64)
-
-    # Stage 3
-    x        = layers.Conv2DTranspose(32, kernel_size=2, strides=2, padding='same')(x)
-    x        = layers.LayerNormalization(epsilon=1e-6)(x)
-    enc1_att = attention_gate(enc1, x, inter_channels=16)
-    x        = layers.Concatenate()([x, enc1_att])
-    x        = convnext_block(x, 32)                      # (64, 128, 32)
-
-    # Final upsample
-    x        = layers.Conv2DTranspose(16, kernel_size=4, strides=2, padding='same')(x)
-    x        = layers.LayerNormalization(epsilon=1e-6)(x)
-    x        = layers.Activation('gelu')(x)
-
-    outputs  = layers.Conv2D(2, kernel_size=1, activation='linear',
-                            dtype='float32')(x)           # (128, 256, 2)
-
-    model = models.Model(inputs, outputs, name="Resonance_v2_ConvNeXt_Attention")
-    return model
-
-
-# ══════════════════════════════════════════════════════
-#  4. NMSE METRIC (logged separately from loss)
-# ══════════════════════════════════════════════════════
 
 def nmse_metric(y_true, y_pred):
-    """Standalone NMSE for monitoring — not used in backprop."""
-    mse    = tf.reduce_mean(tf.square(y_true - y_pred))
-    energy = tf.reduce_mean(tf.square(y_true))
-    return mse / (energy + 1e-8)
+    y_true, y_pred = y_true.float(), y_pred.float()
+    return (y_true - y_pred).square().mean() / (y_true.square().mean() + 1e-8)
 
 
 def nmse_db_metric(y_true, y_pred):
-    """NMSE in dB — the standard telecom reporting format."""
-    nmse = nmse_metric(y_true, y_pred)
-    # Clip to avoid log(0)
-    nmse = tf.maximum(nmse, 1e-10)
-    return 10.0 * tf.experimental.numpy.log10(nmse)
+    return 10.0 * nmse_metric(y_true, y_pred).clamp_min(1e-10).log10()
 
 
-# ══════════════════════════════════════════════════════
-#  SANITY CHECK
-# ══════════════════════════════════════════════════════
+def resonance_loss(lambda_mag=0.05):
+    def loss(y_true, y_pred):
+        y_true, y_pred = y_true.float(), y_pred.float()
+        true_mag = (y_true.square().sum(dim=1) + 1e-8).sqrt()
+        pred_mag = (y_pred.square().sum(dim=1) + 1e-8).sqrt()
+        mag_loss = (true_mag - pred_mag).square().mean() / (true_mag.square().mean() + 1e-8)
+        return nmse_metric(y_true, y_pred) + lambda_mag * mag_loss
+    return loss
+
+
 if __name__ == "__main__":
-    model = build_resonance_model(input_shape=(128, 256, 2))
-    model.summary()
-    print(f"\nTotal params: {model.count_params():,}")
-
-    # Verify output shape
-    import numpy as np
-    dummy = np.random.randn(2, 128, 256, 2).astype(np.float32)
-    out   = model(dummy, training=False)
-    print(f"Input  shape : {dummy.shape}")
-    print(f"Output shape : {out.shape}")
-    assert out.shape == dummy.shape, "Shape mismatch!"
-    print("✅ Shape check passed.")
+    model = build_resonance_model()
+    dummy = torch.randn(1, 2, 128, 256)
+    out = model(dummy)
+    assert out.shape == dummy.shape and torch.isfinite(out).all()
+    resonance_loss()(dummy, out).backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    print(f"Forward/backward passed; parameters: {sum(p.numel() for p in model.parameters()):,}")

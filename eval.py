@@ -7,14 +7,14 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-import tensorflow as tf
+import torch
 
 from model import build_resonance_model
 from preprocess import DATA_ROOT, SPLITS_DIR, add_awgn, load_split_files, normalize_batch
 
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_WEIGHTS = os.path.join(PROJECT_DIR, "weights", "locandkey_multiscenario_best.weights.h5")
+DEFAULT_WEIGHTS = os.path.join(PROJECT_DIR, "weights", "locandkey_multiscenario_best.pt")
 DEFAULT_OUTPUT = os.path.join(PROJECT_DIR, "visualizations", "multiscenario")
 DEFAULT_SNRS = [-10, -5, 0, 5, 10, 15, 20, 25, 30]
 
@@ -138,9 +138,16 @@ def main():
     if not os.path.isfile(args.weights_path):
         raise FileNotFoundError(f"Weights not found: {args.weights_path}")
 
-    tf.keras.utils.set_random_seed(args.seed)
-    model = build_resonance_model((128, 256, 2))
-    model.load_weights(args.weights_path)
+    if args.max_samples_per_scenario is not None and args.max_samples_per_scenario <= 0:
+        raise SystemExit("--max-samples-per-scenario must be positive")
+    if args.weights_path.endswith(".h5"):
+        raise SystemExit("TensorFlow .h5 weights are incompatible; train a PyTorch .pt checkpoint first")
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_resonance_model((128, 256, 2)).to(device)
+    model.load_state_dict(torch.load(args.weights_path, map_location=device, weights_only=True))
+    model.eval()
+    print(f"Device: {device}")
     summary, indices_file, channels = load_split_files(args.data_root, args.split_dir)
     rows = []
 
@@ -156,7 +163,9 @@ def main():
                 clean = normalize_batch(channels[scenario][selected])
                 rng = np.random.default_rng(args.seed + snr_position * 100_003 + scenario_position * 1_009 + batch_number)
                 noisy = add_awgn(clean, np.full(len(clean), snr_db), rng)
-                prediction = np.asarray(model.predict_on_batch(noisy), dtype=np.float32)
+                with torch.inference_mode():
+                    inputs = torch.from_numpy(noisy).permute(0, 3, 1, 2).to(device)
+                    prediction = model(inputs).permute(0, 2, 3, 1).cpu().numpy()
                 if not np.isfinite(prediction).all():
                     raise ValueError(f"Non-finite prediction for {scenario} at {snr_db:g} dB")
                 accumulate(totals, clean, noisy, prediction)

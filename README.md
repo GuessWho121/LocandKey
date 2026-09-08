@@ -509,7 +509,7 @@ The project will be built using:
 
 - Python for implementation
 - NumPy for numerical processing
-- TensorFlow/Keras for the AI model
+- PyTorch for the AI model
 - Matplotlib for graphs
 - Cryptography library for secure encryption
 - DeepMIMO-style wireless data for CSI samples
@@ -622,3 +622,38 @@ Prevent Eve from reading it.
 ```
 
 This makes the project suitable for secure communication in future wireless systems such as 5G, 6G, drones, IoT devices, smart vehicles, and mobile networks.
+
+## PyTorch Training (Windows)
+
+From this project folder, create a separate Python 3.11 training environment with uv:
+
+```powershell
+uv venv --python 3.11 .torchvenv
+uv pip install --python .torchvenv\Scripts\python.exe torch==2.12.0 --index-url https://download.pytorch.org/whl/cu132
+uv pip install --python .torchvenv\Scripts\python.exe -r requirements.txt
+.\.torchvenv\Scripts\Activate.ps1
+python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+python model.py
+python train.py --smoke --batch-size 4 --mixed-precision --require-gpu
+python train.py --epochs 60 --batch-size 4 --mixed-precision --require-gpu
+python eval.py --batch-size 4
+```
+
+The CUDA 13.2 wheel is intended for the RTX 5070 laptop with the reported driver.
+See the [official PyTorch wheel commands](https://pytorch.org/get-started/previous-versions/).
+Ubuntu and a separate CUDA Toolkit installation are not needed for these wheels.
+For CPU checks, install torch from the `/whl/cpu` index and omit the GPU flags.
+Keep `.genvenv` for DeepMIMO. Existing data and split files are reused without regeneration.
+
+The NumPy files remain `(N, 128, 256, 2)`; training converts each batch to PyTorch's
+`(N, 2, 128, 256)` layout. Evaluation converts predictions back before computing metrics.
+The ConvNeXt U-Net, channel attention, attention gates, NMSE plus magnitude loss,
+cosine learning rate, gradient clipping, early stopping, CSV logs and TensorBoard are retained.
+PyTorch initialization differs from Keras, so retraining and evaluation are required.
+TensorFlow `.h5` weights are preserved but cannot be loaded by this implementation.
+
+Best weights: `weights/locandkey_multiscenario_best.pt`.
+Smoke weights and logs use separate `weights/locandkey_smoke.pt` and `logs/smoke` paths.
+Run `tensorboard --logdir logs` to view training curves.
+Run `python test_pytorch.py` for a synthetic CPU training/checkpoint/evaluation check;
+it creates temporary data and does not train on your generated scenarios.

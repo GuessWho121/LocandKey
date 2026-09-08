@@ -142,7 +142,8 @@ def add_awgn(batch, snr_db, rng):
 
 def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=False,
                       snr_min_db=-10.0, snr_max_db=30.0, fixed_snr_db=None, max_samples=None):
-    import tensorflow as tf
+    if batch_size <= 0 or (max_samples is not None and max_samples <= 0):
+        raise ValueError("batch_size and max_samples must be positive")
 
     summary, indices_file, channels = load_split_files(data_root, split_dir)
     scenario_names = list(summary["scenarios"])
@@ -156,7 +157,10 @@ def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=
         selected = np.random.default_rng(seed).permutation(len(references))[:max_samples]
         references = references[selected]
 
-    class CSISequence(tf.keras.utils.Sequence):
+    if not len(references):
+        raise ValueError(f"The {split} split is empty")
+
+    class CSISequence:
         def __init__(self):
             self.references = references
             self.channels = channels
@@ -173,6 +177,8 @@ def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=
             return math.ceil(len(self.references) / self.batch_size)
 
         def __getitem__(self, batch_number):
+            if batch_number < 0 or batch_number >= len(self):
+                raise IndexError(batch_number)
             positions = self.order[batch_number * self.batch_size:(batch_number + 1) * self.batch_size]
             batch_refs = self.references[positions]
             clean = np.empty((len(batch_refs),) + EXPECTED_SAMPLE_SHAPE, dtype=np.float32)
