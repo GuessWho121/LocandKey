@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from model import build_resonance_model, nmse_db_metric, nmse_metric, resonance_loss
-from preprocess import DATA_ROOT, SPLITS_DIR, make_csi_sequence
+from preprocess import DATA_ROOT, SPLITS_DIR, make_csi_sequence, split_fingerprint
 
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -115,6 +115,17 @@ def main():
         args.logs_dir = os.path.join(PROJECT_DIR, "logs", "smoke")
 
     random.seed(args.seed)
+    with open(os.path.join(args.split_dir, "split_summary.json"), encoding="utf-8") as handle:
+        split_summary = json.load(handle)
+    fingerprint = split_fingerprint(args.split_dir)
+    holdout = split_summary.get("holdout_scenario")
+    if holdout:
+        if args.init_weights:
+            raise SystemExit("Holdout experiments must start fresh; --init-weights is not allowed")
+        if os.path.abspath(args.weights_path) == os.path.abspath(DEFAULT_WEIGHTS) or os.path.abspath(args.logs_dir) == os.path.abspath(DEFAULT_LOGS):
+            raise SystemExit("Use separate --weights-path and --logs-dir for the holdout experiment")
+        if checkpoint is not None and checkpoint.get("split_sha256") != fingerprint:
+            raise SystemExit("Resume checkpoint does not belong to these holdout splits")
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -213,7 +224,7 @@ def main():
             train_data.on_epoch_end()
             numpy_rng = np.random.get_state()
             torch.save({
-                "version": 1, "config": vars(args), "next_epoch": epoch + 1,
+                "version": 1, "config": vars(args), "next_epoch": epoch + 1, "split_sha256": fingerprint,
                 "model": model.state_dict(), "best_model": best_state,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(), "best_nmse": float(best_nmse), "stale_epochs": stale_epochs,

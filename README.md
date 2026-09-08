@@ -694,3 +694,61 @@ python train.py --resume --weights-path weights/locandkey_continued_best.pt --lo
 
 Updating files does not change an already-running Python process. Install the
 updated `train.py` on the training laptop before starting either command.
+
+## Train Without Phoenix
+
+This diagnostic excludes Phoenix from training and validation. It uses existing
+channel files and preserves every original split index for the other scenarios.
+Run from the project folder on the training laptop, where data and weights exist:
+
+```powershell
+python preprocess.py --holdout-scenario city_4_phoenix_28 --source-split-dir .\data\splits --output-dir .\data\splits\holdout_phoenix
+python train.py --split-dir .\data\splits\holdout_phoenix --weights-path .\weights\holdout_phoenix_best.pt --logs-dir .\logs\holdout_phoenix --epochs 60 --patience 10 --batch-size 4 --seed 42 --mixed-precision --require-gpu
+python eval.py --split-dir .\data\splits\holdout_phoenix --weights-path .\weights\holdout_phoenix_best.pt --baseline-weights .\weights\locandkey_multiscenario_best.pt --output-dir .\visualizations\holdout_phoenix --batch-size 4
+```
+
+Keep the original channel files, splits, best weights and evaluation outputs.
+Do not regenerate original splits. The split command rejects an existing output
+and rejects overwriting the source. Phoenix's old train/validation/test union
+becomes its new test set; its original test indices are stored separately in the
+same NPZ file. No channel arrays are copied. Source counts, bounds, uniqueness
+and disjointness are checked before writing.
+
+The holdout model starts from scratch with the existing architecture and defaults:
+Adam at 0.0003, cosine decay to 0.000001, noise from -10 to 30 dB, validation at
+10 dB, and NMSE plus 0.05 magnitude loss. `--init-weights` is blocked for this
+experiment. Resume uses a fingerprint of both split files to reject checkpoints
+from other splits (including old checkpoints without a fingerprint):
+
+```powershell
+python train.py --resume --split-dir .\data\splits\holdout_phoenix --weights-path .\weights\holdout_phoenix_best.pt --logs-dir .\logs\holdout_phoenix --require-gpu
+```
+
+Evaluation keeps `metrics.csv`, `nmse_vs_snr.png`, and `gain_by_scenario.png`.
+The additional outputs are:
+
+- `group_metrics.csv`: seen scenarios combined, and all usable Phoenix samples.
+- `original_holdout_test.csv`: Phoenix restricted to the original test indices.
+- `baseline_comparison.csv`: baseline and new model on identical test samples
+  and identical noisy inputs; positive degradation means the new model is worse.
+- `holdout_nmse_vs_snr.png`: unseen Phoenix noisy versus denoised CSI.
+- `evaluation_summary.json`: all results, split fingerprint and decision flags.
+
+The optional `--baseline-weights` re-evaluates the old model to make the comparison
+controlled; it does not trust rounded values or different sample sets from an old
+report. Without it, baseline comparison is explicitly unavailable. Only the
+original Phoenix test subset is compared with that model; its previous training
+samples must not be treated as an independent baseline test. Do not use sample
+limits for the final report. The same test samples are reused across nine SNRs.
+
+Decision rules: Phoenix should gain at least 2 dB at both 0 and 10 dB; flag any
+Phoenix SNR with negative gain. Flag each seen scenario that worsens by more than
+1 dB against the baseline at 0 or 10 dB. Missing target SNRs leave the Phoenix
+target undecided. Inspect validation convergence in `logs/holdout_phoenix` before
+interpreting failure as poor generalization. Do not tune against Phoenix.
+
+Phoenix was chosen after inspecting prior results: this is an environment-exclusion
+diagnostic, not an untouched final benchmark. No architecture or key-generation
+changes are included. Run `python test_pytorch.py` to verify split isolation, invalid
+input rejection, fresh training, resume guards, and matched evaluation on temporary
+synthetic data before the real experiment.

@@ -1,6 +1,7 @@
 """Build reproducible multi-scenario splits without copying CSI arrays."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -98,6 +99,10 @@ def create_splits(data_root, output_dir, seed=42, train_ratio=0.70, val_ratio=0.
         }
         print(f"  usable={len(indices):,} train={counts['train']:,} val={counts['validation']:,} test={counts['test']:,}")
 
+    return save_splits(output_dir, summary, split_arrays)
+
+
+def save_splits(output_dir, summary, split_arrays):
     os.makedirs(output_dir, exist_ok=True)
     indices_path = os.path.join(output_dir, "split_indices.npz")
     summary_path = os.path.join(output_dir, "split_summary.json")
@@ -124,6 +129,65 @@ def load_split_files(data_root, split_dir):
         for name, details in summary["scenarios"].items()
     }
     return summary, indices, channels
+
+
+def split_fingerprint(split_dir):
+    digest = hashlib.sha256()
+    for name in ("split_summary.json", "split_indices.npz"):
+        with open(os.path.join(split_dir, name), "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def create_holdout_splits(data_root, source_dir, output_dir, holdout):
+    if os.path.normcase(os.path.realpath(source_dir)) == os.path.normcase(os.path.realpath(output_dir)):
+        raise ValueError("Holdout output must not overwrite source splits")
+    if any(os.path.exists(os.path.join(output_dir, name)) for name in ("split_indices.npz", "split_summary.json")):
+        raise FileExistsError("Holdout output already exists; choose a new output directory")
+    with open(os.path.join(source_dir, "split_summary.json"), encoding="utf-8") as handle:
+        summary = json.load(handle)
+    if summary.get("holdout_scenario") or holdout not in summary["scenarios"]:
+        raise ValueError("Source must be original splits containing the requested scenario")
+    split_arrays = {}
+    with np.load(os.path.join(source_dir, "split_indices.npz"), allow_pickle=False) as source:
+        for scenario, details in summary["scenarios"].items():
+            data = np.load(os.path.join(data_root, details["path"]), mmap_mode="r", allow_pickle=False)
+            try:
+                if data.shape != (details["source_samples"], *EXPECTED_SAMPLE_SHAPE) or data.dtype != np.float32:
+                    raise ValueError(f"Channel shape/dtype differs from source summary: {scenario}")
+                values = []
+                for split in ("train", "validation", "test"):
+                    key = f"{split}__{scenario}"
+                    indices = source[key]
+                    if (indices.ndim != 1 or indices.dtype.kind not in "iu" or
+                            np.any(indices < 0) or np.any(indices >= len(data)) or
+                            len(indices) != details["splits"][split]):
+                        raise ValueError(f"Invalid source indices: {key}")
+                    split_arrays[key] = indices.copy()
+                    values.append(indices)
+                combined = np.concatenate(values)
+                if len(np.unique(combined)) != len(combined) or len(combined) != details["usable_samples"]:
+                    raise ValueError(f"Duplicate, overlapping or inconsistent source indices: {scenario}")
+            finally:
+                data._mmap.close()
+    original_test = split_arrays[f"test__{holdout}"].copy()
+    if not len(original_test):
+        raise ValueError("Holdout scenario has no original test samples")
+    split_arrays[f"test__{holdout}"] = np.concatenate([
+        split_arrays[f"{split}__{holdout}"] for split in ("train", "validation", "test")])
+    split_arrays[f"original_test__{holdout}"] = original_test
+    for split in ("train", "validation"):
+        split_arrays[f"{split}__{holdout}"] = np.empty(0, dtype=np.int64)
+    for split in ("train", "validation", "test"):
+        summary["scenarios"][holdout]["splits"][split] = len(split_arrays[f"{split}__{holdout}"])
+        summary["totals"][split] = sum(len(split_arrays[f"{split}__{name}"]) for name in summary["scenarios"])
+    if not summary["totals"]["train"] or not summary["totals"]["validation"]:
+        raise ValueError("Holdout leaves no training or validation samples")
+    summary.update(holdout_scenario=holdout, source_split_dir=os.path.abspath(source_dir),
+                   source_split_sha256=split_fingerprint(source_dir),
+                   original_test_key=f"original_test__{holdout}")
+    return save_splits(output_dir, summary, split_arrays)
 
 
 def normalize_batch(batch):
@@ -204,7 +268,9 @@ def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=
 def parse_args():
     parser = argparse.ArgumentParser(description="Create memory-mapped multi-scenario CSI splits.")
     parser.add_argument("--data-root", default=DATA_ROOT)
-    parser.add_argument("--output-dir", default=SPLITS_DIR)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--holdout-scenario")
+    parser.add_argument("--source-split-dir")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-ratio", type=float, default=0.70)
     parser.add_argument("--val-ratio", type=float, default=0.15)
@@ -214,4 +280,12 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    create_splits(args.data_root, args.output_dir, args.seed, args.train_ratio, args.val_ratio, args.chunk_size)
+    if args.holdout_scenario:
+        if not args.source_split_dir:
+            raise SystemExit("--holdout-scenario requires --source-split-dir")
+        output = args.output_dir or os.path.join(args.data_root, "splits", "holdout_phoenix")
+        create_holdout_splits(args.data_root, args.source_split_dir, output, args.holdout_scenario)
+    elif args.source_split_dir:
+        raise SystemExit("--source-split-dir requires --holdout-scenario")
+    else:
+        create_splits(args.data_root, args.output_dir or SPLITS_DIR, args.seed, args.train_ratio, args.val_ratio, args.chunk_size)
