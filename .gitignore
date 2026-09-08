@@ -17,3 +17,7 @@ logs/*
 __pycache__/
 *.pyc
 .torchvenv/
+
+.genvenv/
+.prodvenv/
+.venv/
