@@ -26,6 +26,9 @@ def parse_args():
     parser.add_argument("--split-dir", default=SPLITS_DIR)
     parser.add_argument("--weights-path", default=DEFAULT_WEIGHTS)
     parser.add_argument("--logs-dir", default=DEFAULT_LOGS)
+    restore = parser.add_mutually_exclusive_group()
+    restore.add_argument("--resume", nargs="?", const="auto", help="Resume a full checkpoint (default: best path + .last.pt).")
+    restore.add_argument("--init-weights", help="Start a new training schedule from existing weights-only .pt file.")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--patience", type=int, default=10)
@@ -82,6 +85,19 @@ def run_epoch(model, data, device, optimizer=None, scheduler=None, scaler=None):
 
 def main():
     args = parse_args()
+    checkpoint = None
+    if args.resume:
+        path = args.weights_path + ".last.pt" if args.resume == "auto" else args.resume
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        if checkpoint.get("version") != 1:
+            raise SystemExit("This is not a full checkpoint. Use --init-weights for old weights-only files.")
+        # Restore the original schedule and data settings; output paths may move between laptops.
+        for key in ("epochs", "batch_size", "patience", "learning_rate", "min_learning_rate",
+                    "snr_min_db", "snr_max_db", "validation_snr_db", "max_train_samples",
+                    "max_val_samples", "seed", "mixed_precision"):
+            setattr(args, key, checkpoint["config"][key])
+        if args.smoke:
+            raise SystemExit("Resume smoke runs with explicit checkpoint/output paths, without --smoke")
     if args.batch_size <= 0 or args.epochs <= 0:
         raise SystemExit("--batch-size and --epochs must be positive")
     if args.snr_min_db >= args.snr_max_db:
@@ -127,17 +143,51 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_learning_rate)
     scaler = torch.amp.GradScaler("cuda", enabled=args.mixed_precision)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    last_path = args.weights_path + ".last.pt"
+    start_epoch, best_nmse, stale_epochs = 0, float("inf"), 0
+    best_state = None
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        scaler.load_state_dict(checkpoint["scaler"])
+        start_epoch = checkpoint["next_epoch"]
+        best_nmse, stale_epochs = checkpoint["best_nmse"], checkpoint["stale_epochs"]
+        best_state = checkpoint["best_model"]
+        for _ in range(start_epoch):
+            train_data.on_epoch_end()
+        torch.set_rng_state(checkpoint["torch_rng"])
+        if device.type == "cuda" and checkpoint["cuda_rng"]:
+            torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
+        random.setstate(checkpoint["python_rng"])
+        state = checkpoint["numpy_rng"]
+        np.random.set_state((state[0], np.asarray(state[1], dtype=np.uint32), *state[2:]))
+        print(f"Resuming at epoch {start_epoch + 1}; original target: {args.epochs} epochs")
+        if start_epoch >= args.epochs or (stale_epochs > 0 and stale_epochs >= args.patience):
+            print("This run already finished or reached early stopping. Use --init-weights for a new schedule.")
+            return
+    elif args.init_weights:
+        model.load_state_dict(torch.load(args.init_weights, map_location=device, weights_only=True))
+        best_nmse = run_epoch(model, validation_data, device, scaler=scaler)["nmse_metric"]
+        best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+        print("Loaded existing weights; optimizer and epoch count start fresh.")
+    elif os.path.exists(args.weights_path) or os.path.exists(last_path):
+        raise SystemExit("Existing checkpoints found. Use --resume, --init-weights, or a new --weights-path.")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.weights_path)), exist_ok=True)
     os.makedirs(args.logs_dir, exist_ok=True)
     with open(os.path.join(args.logs_dir, "training_config.json"), "w", encoding="utf-8") as handle:
         json.dump(vars(args), handle, indent=2)
-    best_nmse, stale_epochs = float("inf"), 0
+    if best_state is not None:
+        torch.save(best_state, args.weights_path + ".tmp")
+        os.replace(args.weights_path + ".tmp", args.weights_path)
+    csv_path = os.path.join(args.logs_dir, "training_log.csv")
+    has_header = checkpoint is not None and os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0
     with SummaryWriter(args.logs_dir) as writer, open(
-        os.path.join(args.logs_dir, "training_log.csv"), "w", newline="", encoding="utf-8"
+        csv_path, "a" if checkpoint is not None else "w", newline="", encoding="utf-8"
     ) as handle:
         csv_writer = None
-        for epoch in range(args.epochs):
+        for epoch in range(start_epoch, args.epochs):
             print(f"Epoch {epoch + 1}/{args.epochs}")
             metrics = run_epoch(model, train_data, device, optimizer, scheduler, scaler)
             validation = run_epoch(model, validation_data, device, scaler=scaler)
@@ -145,7 +195,8 @@ def main():
                    "learning_rate": optimizer.param_groups[0]["lr"]}
             if csv_writer is None:
                 csv_writer = csv.DictWriter(handle, fieldnames=list(row))
-                csv_writer.writeheader()
+                if not has_header:
+                    csv_writer.writeheader()
             csv_writer.writerow(row)
             handle.flush()
             for key, value in row.items():
@@ -154,17 +205,35 @@ def main():
             print(f"Validation NMSE: {validation['nmse_db_metric']:.2f} dB")
             if validation["nmse_metric"] < best_nmse:
                 best_nmse, stale_epochs = validation["nmse_metric"], 0
+                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
                 torch.save(model.state_dict(), args.weights_path + ".tmp")
                 os.replace(args.weights_path + ".tmp", args.weights_path)
             else:
                 stale_epochs += 1
-                if stale_epochs >= args.patience:
-                    print("Early stopping")
-                    break
             train_data.on_epoch_end()
+            numpy_rng = np.random.get_state()
+            torch.save({
+                "version": 1, "config": vars(args), "next_epoch": epoch + 1,
+                "model": model.state_dict(), "best_model": best_state,
+                "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(), "best_nmse": float(best_nmse), "stale_epochs": stale_epochs,
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
+                "python_rng": random.getstate(),
+                "numpy_rng": (numpy_rng[0], numpy_rng[1].tolist(), *numpy_rng[2:]),
+            }, last_path + ".tmp")
+            os.replace(last_path + ".tmp", last_path)
+            print(f"Resume checkpoint saved: {last_path}")
+            if stale_epochs > 0 and stale_epochs >= args.patience:
+                print("Early stopping")
+                break
     model.load_state_dict(torch.load(args.weights_path, map_location=device, weights_only=True))
     print(f"Best weights: {args.weights_path}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nStopped. Resume uses the last completed epoch checkpoint, if one was saved.")
+        raise SystemExit(130)

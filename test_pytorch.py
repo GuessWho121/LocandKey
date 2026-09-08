@@ -62,7 +62,46 @@ def main():
         assert len(report["results"]) == 4
         assert all(np.isfinite(row["model_nmse_db"]) for row in report["results"])
         assert (work / "evaluation" / "nmse_vs_snr.png").is_file()
-    print("PASS: layout, loss, gradients, deterministic validation, training, checkpoint and evaluation")
+        common = ["--data-root", str(work), "--split-dir", str(splits), "--epochs", "2",
+                  "--batch-size", "1", "--max-train-samples", "2", "--max-val-samples", "1"]
+        uninterrupted = work / "uninterrupted.pt"
+        resumed = work / "resumed.pt"
+        subprocess.run([sys.executable, str(root / "train.py"), *common,
+                        "--weights-path", str(uninterrupted), "--logs-dir", str(work / "baseline_logs")],
+                       check=True, env=env)
+        interrupt_code = """
+import train
+original = train.run_epoch
+calls = 0
+def interrupted(*args, **kwargs):
+    global calls
+    calls += 1
+    if calls == 3:
+        raise KeyboardInterrupt
+    return original(*args, **kwargs)
+train.run_epoch = interrupted
+try:
+    train.main()
+except KeyboardInterrupt:
+    pass
+"""
+        resume_args = [*common, "--weights-path", str(resumed), "--logs-dir", str(work / "resume_logs")]
+        subprocess.run([sys.executable, "-c", interrupt_code, *resume_args], cwd=root, check=True, env=env)
+        saved = torch.load(str(resumed) + ".last.pt", weights_only=True)
+        assert saved["next_epoch"] == 1 and saved["optimizer"]["state"]
+        subprocess.run([sys.executable, str(root / "train.py"), *resume_args, "--resume"], check=True, env=env)
+        actual = torch.load(str(resumed) + ".last.pt", weights_only=True)
+        expected = torch.load(str(uninterrupted) + ".last.pt", weights_only=True)
+        assert actual["next_epoch"] == 2 and actual["scheduler"] == expected["scheduler"]
+        for key in expected["model"]:
+            torch.testing.assert_close(actual["model"][key], expected["model"][key], rtol=0, atol=0)
+        with open(work / "resume_logs" / "training_log.csv", newline="") as handle:
+            assert [row["epoch"] for row in csv.DictReader(handle)] == ["0", "1"]
+        subprocess.run([sys.executable, str(root / "train.py"), *common,
+                        "--weights-path", str(work / "warm.pt"), "--logs-dir", str(work / "warm_logs"),
+                        "--init-weights", str(weights)], check=True, env=env)
+        assert (work / "warm.pt.last.pt").is_file()
+    print("PASS: training/evaluation, weights initialization, and exact epoch-boundary resume")
 
 
 if __name__ == "__main__":

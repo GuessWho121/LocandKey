@@ -657,3 +657,40 @@ Smoke weights and logs use separate `weights/locandkey_smoke.pt` and `logs/smoke
 Run `tensorboard --logdir logs` to view training curves.
 Run `python test_pytorch.py` for a synthetic CPU training/checkpoint/evaluation check;
 it creates temporary data and does not train on your generated scenarios.
+
+### Stop and Resume
+
+The best `.pt` file remains weights-only for evaluation. Each completed epoch also
+saves a full checkpoint at `weights/locandkey_multiscenario_best.pt.last.pt`.
+This includes the latest model, best model, optimizer, scheduler, AMP scaler,
+epoch, early-stopping state and random states. Writes use a temporary file followed
+by replacement. Ctrl+C or a crash loses the unfinished epoch; resume repeats that
+epoch from its beginning. No full checkpoint exists until the first epoch finishes.
+
+For a run started with this version:
+
+```powershell
+python train.py --resume --require-gpu
+```
+
+Resume restores the saved training settings, including the original total epoch
+target and precision mode. Use the same data and splits. If you used custom output
+paths, supply those again; `--resume PATH` selects a specific full checkpoint.
+CSV logs append during resume. A completed or early-stopped run is not restarted.
+
+For your already-running, older script, wait for a best checkpoint, stop it, then
+start from those weights with a new output name to preserve the original:
+
+```powershell
+python train.py --init-weights weights/locandkey_multiscenario_best.pt --weights-path weights/locandkey_continued_best.pt --logs-dir logs/continued --epochs 60 --batch-size 4 --mixed-precision --require-gpu
+```
+
+This starts 60 new epochs with a fresh optimizer and schedule; the old script never
+saved those states. Subsequent interruptions of that run can be resumed using:
+
+```powershell
+python train.py --resume --weights-path weights/locandkey_continued_best.pt --logs-dir logs/continued --require-gpu
+```
+
+Updating files does not change an already-running Python process. Install the
+updated `train.py` on the training laptop before starting either command.
