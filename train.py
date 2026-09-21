@@ -5,9 +5,11 @@ import csv
 import json
 import os
 import random
+from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -48,13 +50,21 @@ def parse_args():
 
 def run_epoch(model, data, device, optimizer=None, scheduler=None, scaler=None):
     training = optimizer is not None
+    distributed = dist.is_initialized()
+    rank, world = (dist.get_rank(), dist.get_world_size()) if distributed else (0, 1)
     model.train(training)
     totals = np.zeros(3, dtype=np.float64)
     count = 0
     loss_fn = resonance_loss(lambda_mag=0.05)
-    progress = tqdm(range(len(data)), desc="Train" if training else "Validation")
+    progress = tqdm(range(len(data)), desc="Train" if training else "Validation",
+                    mininterval=30, disable=rank != 0)
     for index in progress:
         noisy, clean = data[index]
+        global_count = len(clean)
+        local_count = len(clean[rank::world])
+        # Empty ranks still participate in DDP backward, with zero loss weight.
+        noisy, clean = ((noisy[rank::world], clean[rank::world]) if local_count
+                        else (noisy[:1], clean[:1]))
         inputs = torch.from_numpy(noisy).permute(0, 3, 1, 2).to(device)
         targets = torch.from_numpy(clean).permute(0, 3, 1, 2).to(device)
         if training:
@@ -64,10 +74,13 @@ def run_epoch(model, data, device, optimizer=None, scheduler=None, scaler=None):
                                 enabled=scaler is not None and scaler.is_enabled()):
                 prediction = model(inputs)
             loss = loss_fn(targets, prediction)
-            if not torch.isfinite(loss):
+            finite = torch.isfinite(loss).to(torch.int32)
+            if distributed:
+                dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+            if not finite:
                 raise FloatingPointError(f"Non-finite loss at batch {index}")
             if training:
-                scaler.scale(loss).backward()
+                scaler.scale(loss * (world * local_count / global_count)).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 old_scale = scaler.get_scale()
@@ -77,14 +90,26 @@ def run_epoch(model, data, device, optimizer=None, scheduler=None, scaler=None):
                     scheduler.step()
         values = (loss.detach().item(), nmse_metric(targets, prediction.detach()).item(),
                   nmse_db_metric(targets, prediction.detach()).item())
-        totals += np.asarray(values) * len(clean)
-        count += len(clean)
-        progress.set_postfix(loss=f"{totals[0] / count:.4f}")
+        totals += np.asarray(values) * local_count
+        count += local_count
+        progress.set_postfix(loss=f"{totals[0] / max(count, 1):.4f}", refresh=False)
+    if distributed:
+        sums = torch.tensor([*totals, count], dtype=torch.float64, device=device)
+        dist.all_reduce(sums)
+        totals, count = sums[:3].cpu().numpy(), sums[3].item()
     return dict(zip(("loss", "nmse_metric", "nmse_db_metric"), totals / count))
 
 
 def main():
     args = parse_args()
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    primary = rank == 0
+    if world > 1:
+        torch.cuda.set_device(local_rank)
+        torch.set_num_threads(2)
+        dist.init_process_group("nccl")
     checkpoint = None
     if args.resume:
         path = args.weights_path + ".last.pt" if args.resume == "auto" else args.resume
@@ -128,7 +153,7 @@ def main():
             raise SystemExit("Resume checkpoint does not belong to these holdout splits")
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
     if args.require_gpu and device.type != "cuda":
         raise SystemExit("No PyTorch CUDA GPU is available; install the CUDA wheel documented in README.md")
     if args.mixed_precision and device.type != "cuda":
@@ -149,6 +174,10 @@ def main():
     print(f"Validation samples: {len(validation_data.references):,} at {args.validation_snr_db:g} dB")
 
     model = build_resonance_model((128, 256, 2)).to(device)
+    train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+                   if world > 1 else model)
+    if primary and world > 1:
+        print(f"Using {world} GPUs with DistributedDataParallel; global batch size {args.batch_size}")
     total_steps = max(1, args.epochs * len(train_data))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-7)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_learning_rate)
@@ -179,7 +208,7 @@ def main():
             return
     elif args.init_weights:
         model.load_state_dict(torch.load(args.init_weights, map_location=device, weights_only=True))
-        best_nmse = run_epoch(model, validation_data, device, scaler=scaler)["nmse_metric"]
+        best_nmse = run_epoch(train_model, validation_data, device, scaler=scaler)["nmse_metric"]
         best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
         print("Loaded existing weights; optimizer and epoch count start fresh.")
     elif os.path.exists(args.weights_path) or os.path.exists(last_path):
@@ -187,43 +216,47 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(args.weights_path)), exist_ok=True)
     os.makedirs(args.logs_dir, exist_ok=True)
-    with open(os.path.join(args.logs_dir, "training_config.json"), "w", encoding="utf-8") as handle:
-        json.dump(vars(args), handle, indent=2)
-    if best_state is not None:
+    if primary:
+        with open(os.path.join(args.logs_dir, "training_config.json"), "w", encoding="utf-8") as handle:
+            json.dump(vars(args), handle, indent=2)
+    if best_state is not None and primary:
         torch.save(best_state, args.weights_path + ".tmp")
         os.replace(args.weights_path + ".tmp", args.weights_path)
     csv_path = os.path.join(args.logs_dir, "training_log.csv")
     has_header = checkpoint is not None and os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0
-    with SummaryWriter(args.logs_dir) as writer, open(
+    with (SummaryWriter(args.logs_dir) if primary else nullcontext()) as writer, (open(
         csv_path, "a" if checkpoint is not None else "w", newline="", encoding="utf-8"
-    ) as handle:
+    ) if primary else nullcontext()) as handle:
         csv_writer = None
         for epoch in range(start_epoch, args.epochs):
             print(f"Epoch {epoch + 1}/{args.epochs}")
-            metrics = run_epoch(model, train_data, device, optimizer, scheduler, scaler)
-            validation = run_epoch(model, validation_data, device, scaler=scaler)
+            metrics = run_epoch(train_model, train_data, device, optimizer, scheduler, scaler)
+            validation = run_epoch(train_model, validation_data, device, scaler=scaler)
             row = {"epoch": epoch, **metrics, **{f"val_{key}": value for key, value in validation.items()},
                    "learning_rate": optimizer.param_groups[0]["lr"]}
-            if csv_writer is None:
-                csv_writer = csv.DictWriter(handle, fieldnames=list(row))
-                if not has_header:
-                    csv_writer.writeheader()
-            csv_writer.writerow(row)
-            handle.flush()
-            for key, value in row.items():
-                if key != "epoch":
-                    writer.add_scalar(key, value, epoch)
-            print(f"Validation NMSE: {validation['nmse_db_metric']:.2f} dB")
+            if primary:
+                if csv_writer is None:
+                    csv_writer = csv.DictWriter(handle, fieldnames=list(row))
+                    if not has_header:
+                        csv_writer.writeheader()
+                csv_writer.writerow(row)
+                handle.flush()
+                for key, value in row.items():
+                    if key != "epoch":
+                        writer.add_scalar(key, value, epoch)
+                print(f"Validation NMSE: {validation['nmse_db_metric']:.2f} dB")
             if validation["nmse_metric"] < best_nmse:
                 best_nmse, stale_epochs = validation["nmse_metric"], 0
                 best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                torch.save(model.state_dict(), args.weights_path + ".tmp")
-                os.replace(args.weights_path + ".tmp", args.weights_path)
+                if primary:
+                    torch.save(model.state_dict(), args.weights_path + ".tmp")
+                    os.replace(args.weights_path + ".tmp", args.weights_path)
             else:
                 stale_epochs += 1
             train_data.on_epoch_end()
             numpy_rng = np.random.get_state()
-            torch.save({
+            if primary:
+                torch.save({
                 "version": 1, "config": vars(args), "next_epoch": epoch + 1, "split_sha256": fingerprint,
                 "model": model.state_dict(), "best_model": best_state,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
@@ -232,9 +265,11 @@ def main():
                 "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
                 "python_rng": random.getstate(),
                 "numpy_rng": (numpy_rng[0], numpy_rng[1].tolist(), *numpy_rng[2:]),
-            }, last_path + ".tmp")
-            os.replace(last_path + ".tmp", last_path)
-            print(f"Resume checkpoint saved: {last_path}")
+                }, last_path + ".tmp")
+                os.replace(last_path + ".tmp", last_path)
+                print(f"Resume checkpoint saved: {last_path}")
+            if world > 1:
+                dist.barrier()
             if stale_epochs > 0 and stale_epochs >= args.patience:
                 print("Early stopping")
                 break
@@ -248,3 +283,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nStopped. Resume uses the last completed epoch checkpoint, if one was saved.")
         raise SystemExit(130)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

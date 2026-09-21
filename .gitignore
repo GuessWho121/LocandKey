@@ -21,3 +21,5 @@ __pycache__/
 .genvenv/
 .prodvenv/
 .venv/
+kaggle/bundle/
+kaggle-output/

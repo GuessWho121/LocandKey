@@ -1,0 +1,13 @@
+{
+  "id": "akshatsinhabai1443/locandkey-phoenix-holdout",
+  "title": "LocandKey Phoenix Holdout",
+  "code_file": "launch.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": ["akshatsinhabai1443/cns-proj"],
+  "competition_sources": [],
+  "kernel_sources": ["akshatsinhabai1443/locandkey-training"]
+}

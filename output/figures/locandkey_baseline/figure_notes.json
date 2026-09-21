@@ -1,0 +1,170 @@
+{
+  "title": "LocandKey | Baseline performance",
+  "best_epoch": 59,
+  "training": {
+    "source": 93489,
+    "usable": 93489,
+    "train": 65442,
+    "validation": 14023,
+    "test": 14024
+  },
+  "split_sha256": "741a6abc5a918e7694682f6bb566846bef548c8b240a6b5d46e6d3bb108eb9e6",
+  "figures": [
+    {
+      "slug": "01_loss",
+      "title": "Training and validation loss",
+      "reading": "Loss combines normalized reconstruction error with a magnitude penalty (weight 0.05). Lower is better. The left panel retains the large initial loss; the right panel reveals late-training behavior. Curves are unsmoothed.",
+      "inference": "Training loss falls from 29.67 to 0.00372. Validation loss ends at 0.00160. The early validation spike is followed by recovery, with smaller improvements late in training.",
+      "caution": "Training spans random -10 to 30 dB noise; validation is fixed at 10 dB. Training is also measured while weights change within each epoch. Therefore the gap is not a clean overfitting measure."
+    },
+    {
+      "slug": "02_nmse_convergence",
+      "title": "Reconstruction error through training",
+      "reading": "NMSE measures error energy relative to clean-signal energy. Here the epoch's sample-weighted mean linear NMSE is converted to dB; it is not the log's mean of batch-level dB values.",
+      "inference": "Epoch 59, chosen only by minimum validation linear NMSE, reaches -28.08 dB on validation. Its independent test score at 10 dB is -28.06 dB, a close result on the same scenario mixture.",
+      "caution": "The previously reported -29.60 dB validation value averages batch dB scores. Averaging before versus after the logarithm differs. Training also includes harder noise levels; these scores are not classification accuracy."
+    },
+    {
+      "slug": "03_test_nmse",
+      "title": "Test performance across noise levels",
+      "reading": "Each point evaluates all 14,024 held-out test samples. Error and signal energies are pooled across samples before converting their ratio to dB. The vertical gap measures improvement over noisy input.",
+      "inference": "At 0 dB input SNR, NMSE improves by 23.36 dB (about 217 times less error energy). At 10 dB, improvement is 18.06 dB (about 64 times less). Even at 30 dB, improvement remains 3.70 dB.",
+      "caution": "These are simulated AWGN tests on held-out samples from environments represented in training. They do not yet establish performance on unseen environments or real measured noise. Phoenix holdout results are excluded."
+    },
+    {
+      "slug": "04_scenario_gains",
+      "title": "Denoising gain by environment",
+      "reading": "Each cell is noisy-input NMSE minus model NMSE for one scenario and SNR. Positive numbers mean denoising helps. Sample counts are per SNR; the same clean test samples are evaluated with new deterministic noise.",
+      "inference": "All 45 scenario/SNR combinations improve, with gains from 1.18 to 32.05 dB. At 10 dB input, scenario gains range from 15.12 to 24.78 dB. Both preset acceptance checks at 0 and 10 dB pass.",
+      "caution": "Scenario difficulty varies and Phoenix has fewer test samples. This baseline model trained on all five environments, including Phoenix; this figure must not be presented as an unseen-environment experiment."
+    },
+    {
+      "slug": "05_reconstruction_quality",
+      "title": "Signal similarity and absolute error",
+      "reading": "Left: magnitude of normalized complex correlation, pooled across test elements. Right: mean absolute complex reconstruction error on normalized CSI, shown on a logarithmic scale.",
+      "inference": "At 0 dB, correlation rises from 0.7071 to 0.9977. At 10 dB it rises from 0.9535 to 0.9992. At 10 dB, mean absolute error decreases by 9.26 times. Both metrics support the NMSE improvement.",
+      "caution": "Correlation magnitude alone cannot detect all scale or common-phase errors; read it alongside NMSE and absolute error. MAE is in normalized CSI units, not physical received-power units."
+    },
+    {
+      "slug": "06_learning_rate",
+      "title": "Learning-rate schedule",
+      "reading": "The curve records the optimizer learning rate at the end of each epoch. The run uses cosine annealing from an initial 0.0003 toward 0.000001; the schedule advances on successful optimizer steps.",
+      "inference": "The smooth decay shows that the scheduled reduction was applied. Smaller updates coincide with the stable late-training region, and the best checkpoint occurs near the end of the schedule.",
+      "caution": "This is training context, not an independent performance result. One run cannot establish that cosine annealing is better than a different schedule. No error bars are available from this single-seed experiment."
+    }
+  ],
+  "overall": [
+    {
+      "scenario": "overall",
+      "snr_db": -10,
+      "samples": 14024,
+      "noisy_nmse_db": 10.00001300004594,
+      "model_nmse_db": -16.78769176288665,
+      "nmse_gain_db": 26.787704762932588,
+      "noisy_mae": 0.015481743121871774,
+      "model_mae": 0.0006495362734288566,
+      "noisy_correlation": 0.3015604842853458,
+      "model_correlation": 0.9894687915918874
+    },
+    {
+      "scenario": "overall",
+      "snr_db": -5,
+      "samples": 14024,
+      "noisy_nmse_db": 5.00018905894736,
+      "model_nmse_db": -20.29171472313187,
+      "nmse_gain_db": 25.29190378207923,
+      "noisy_mae": 0.00870607743738315,
+      "model_mae": 0.0004269489910035619,
+      "noisy_correlation": 0.4901705550227342,
+      "model_correlation": 0.995313827030571
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 0,
+      "samples": 14024,
+      "noisy_nmse_db": -0.00012943251223767574,
+      "model_nmse_db": -23.360279183221774,
+      "nmse_gain_db": 23.360149750709535,
+      "noisy_mae": 0.004895667303060428,
+      "model_mae": 0.0002951090655132398,
+      "noisy_correlation": 0.7070883644936174,
+      "model_correlation": 0.9976907485096818
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 5,
+      "samples": 14024,
+      "noisy_nmse_db": -4.999916233821874,
+      "model_nmse_db": -25.955495703696094,
+      "nmse_gain_db": 20.95557946987422,
+      "noisy_mae": 0.0027531181401787208,
+      "model_mae": 0.00021569534479524584,
+      "noisy_correlation": 0.8716257612199202,
+      "model_correlation": 0.9987299727806336
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 10,
+      "samples": 14024,
+      "noisy_nmse_db": -10.000249790385077,
+      "model_nmse_db": -28.06306135563345,
+      "nmse_gain_db": 18.062811565248374,
+      "noisy_mae": 0.0015481397044183423,
+      "model_mae": 0.00016727466003854408,
+      "noisy_correlation": 0.9534639896239501,
+      "model_correlation": 0.9992180254093961
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 15,
+      "samples": 14024,
+      "noisy_nmse_db": -14.999910183494105,
+      "model_nmse_db": -29.760084962176553,
+      "nmse_gain_db": 14.760174778682448,
+      "noisy_mae": 0.0008706192960068201,
+      "model_mae": 0.00013686654297778144,
+      "noisy_correlation": 0.984553746829109,
+      "model_correlation": 0.9994705423793872
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 20,
+      "samples": 14024,
+      "noisy_nmse_db": -19.99984310756793,
+      "model_nmse_db": -31.294272769850867,
+      "nmse_gain_db": 11.294429662282937,
+      "noisy_mae": 0.0004895871673571219,
+      "model_mae": 0.00011545764265194439,
+      "noisy_correlation": 0.9950370483139528,
+      "model_correlation": 0.999627788373313
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 25,
+      "samples": 14024,
+      "noisy_nmse_db": -24.999602328081544,
+      "model_nmse_db": -32.769712971126275,
+      "nmse_gain_db": 7.770110643044731,
+      "noisy_mae": 0.00027532342438042984,
+      "model_mae": 9.791804090136877e-05,
+      "noisy_correlation": 0.9984223183542437,
+      "model_correlation": 0.9997346315276504
+    },
+    {
+      "scenario": "overall",
+      "snr_db": 30,
+      "samples": 14024,
+      "noisy_nmse_db": -30.000297293953913,
+      "model_nmse_db": -33.704293001210466,
+      "nmse_gain_db": 3.703995707256553,
+      "noisy_mae": 0.0001548132058302063,
+      "model_mae": 8.726282002829771e-05,
+      "noisy_correlation": 0.9994998214182086,
+      "model_correlation": 0.9997857799905229
+    }
+  ],
+  "sources": [
+    "C:\\Users\\aksha\\Documents\\Projects\\LocandKey\\kaggle-output\\baseline\\training\\locandkey\\logs\\multiscenario\\training_log.csv",
+    "C:\\Users\\aksha\\Documents\\Projects\\LocandKey\\kaggle-output\\baseline\\evaluation\\evaluation\\results\\evaluation_summary.json"
+  ]
+}
