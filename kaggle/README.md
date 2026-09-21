@@ -64,3 +64,17 @@ These are synthetic measurements; full-data throughput includes disk and noise
 generation. Raw results are in the private `locandkey-diagnostic` kernel outputs.
 
 Metadata reference: https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels_metadata.md
+
+## Generalization Development Holdout
+
+Phoenix is frozen after the failed zero-shot experiment. Build a bounded San
+Francisco development smoke run from the current local modules:
+
+```powershell
+.venv\Scripts\python.exe .\kaggle\holdout\build.py --scenario city_16_sanfrancisco_28 --smoke
+.venv\Scripts\kaggle.exe kernels push -p .\kaggle\holdout\bundle --accelerator NvidiaTeslaT4 --timeout 43200
+```
+
+After verifying that output, rebuild without `--smoke` and push the same kernel
+ID for the full 60-epoch DDP run. The launcher compares against the verified
+legacy baseline on identical samples and noise but never evaluates Phoenix.

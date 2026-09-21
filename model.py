@@ -51,11 +51,15 @@ class AttentionGate(nn.Module):
 
 
 class ResonanceModel(nn.Module):
-    def __init__(self, input_shape=(128, 256, 2)):
+    def __init__(self, input_shape=(128, 256, 2), residual=True, safety_factor=2.0):
         super().__init__()
         if len(input_shape) != 3 or input_shape[2] != 2 or any(n <= 0 or n % 16 for n in input_shape[:2]):
             raise ValueError("input_shape must be (height, width, 2), with positive multiples of 16")
+        if safety_factor <= 0:
+            raise ValueError("safety_factor must be positive")
         self.input_shape = tuple(input_shape)
+        self.residual = residual
+        self.safety_factor = safety_factor
         self.encoder = nn.ModuleList()
         for cin, cout, kernel in ((2, 32, 4), (32, 64, 2), (64, 128, 2)):
             self.encoder.append(nn.Sequential(nn.Conv2d(cin, cout, kernel, stride=2, padding=1 if kernel == 4 else 0),
@@ -71,10 +75,14 @@ class ResonanceModel(nn.Module):
             self.decoder.append(ConvNeXtBlock(cout * 2, cout))
         self.final = nn.Sequential(nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1), ChannelNorm(16), nn.GELU())
         self.output = nn.Conv2d(16, 2, 1)
+        if residual:
+            nn.init.zeros_(self.output.weight)
+            nn.init.zeros_(self.output.bias)
 
-    def forward(self, x):
+    def forward(self, x, snr_db=None):
         if x.ndim != 4 or tuple(x.shape[1:]) != (2, *self.input_shape[:2]):
             raise ValueError(f"Expected (N, 2, {self.input_shape[0]}, {self.input_shape[1]}), got {tuple(x.shape)}")
+        noisy = x
         skips = []
         for encoder in self.encoder:
             x = encoder(x)
@@ -84,13 +92,32 @@ class ResonanceModel(nn.Module):
             x = up(x)
             x = decoder(torch.cat((x, gate(skip, x)), dim=1))
         x = self.final(x)
-        # Keep the final reconstruction and small normalized CSI losses in float32.
+        # Keep the reconstruction and small normalized CSI losses in float32.
         with torch.autocast(device_type=x.device.type, enabled=False):
-            return self.output(x.float())
+            correction = self.output(x.float())
+            if not self.residual:
+                return correction
+            if snr_db is None:
+                raise ValueError("snr_db is required for residual denoising")
+            snr = torch.as_tensor(snr_db, dtype=torch.float32, device=x.device).flatten()
+            if snr.numel() == 1:
+                snr = snr.expand(len(x))
+            if snr.numel() != len(x) or not torch.isfinite(snr).all():
+                raise ValueError(f"Expected one finite SNR per sample, got {tuple(snr.shape)}")
+            correction_norm = torch.linalg.vector_norm(correction.flatten(1), dim=1)
+            limit = self.safety_factor * torch.pow(10.0, -snr / 20.0)
+            shape = (-1, 1, 1, 1)
+            if self.training:
+                correction = correction * torch.minimum(
+                    torch.ones_like(limit), limit / correction_norm.clamp_min(1e-8)).view(shape)
+            else:
+                safe = torch.isfinite(correction_norm) & (correction_norm <= limit)
+                correction = torch.where(safe.view(shape), correction, torch.zeros_like(correction))
+            return noisy.float() + correction
 
 
-def build_resonance_model(input_shape=(128, 256, 2)):
-    return ResonanceModel(input_shape)
+def build_resonance_model(input_shape=(128, 256, 2), residual=True, safety_factor=2.0):
+    return ResonanceModel(input_shape, residual=residual, safety_factor=safety_factor)
 
 
 def nmse_metric(y_true, y_pred):
@@ -115,8 +142,12 @@ def resonance_loss(lambda_mag=0.05):
 if __name__ == "__main__":
     model = build_resonance_model()
     dummy = torch.randn(1, 2, 128, 256)
-    out = model(dummy)
-    assert out.shape == dummy.shape and torch.isfinite(out).all()
+    out = model(dummy, torch.tensor([10.0]))
+    assert out.shape == dummy.shape and torch.equal(out, dummy)
     resonance_loss()(dummy, out).backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    model.eval()
+    with torch.no_grad():
+        model.output.bias.fill_(100)
+        assert torch.equal(model(dummy, torch.tensor([30.0])), dummy)
     print(f"Forward/backward passed; parameters: {sum(p.numel() for p in model.parameters()):,}")

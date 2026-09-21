@@ -11,6 +11,11 @@ import torch.multiprocessing as mp
 from train import run_epoch
 
 
+class TinyModel(torch.nn.Conv2d):
+    def forward(self, x, snr_db):
+        return super().forward(x)
+
+
 def worker(rank, rendezvous):
     torch.set_num_threads(1)
     torch.manual_seed(123)
@@ -19,9 +24,9 @@ def worker(rank, rendezvous):
     for size in (4, 3, 1):
         clean = rng.normal(size=(size, 4, 4, 2)).astype(np.float32)
         clean /= np.sqrt((clean * clean).sum(axis=(1, 2, 3), keepdims=True))
-        data.append((clean + .01, clean))
-    baseline = torch.nn.Conv2d(2, 2, 1)
-    model = torch.nn.Conv2d(2, 2, 1)
+        data.append((clean + .01, clean, np.full(size, 10, dtype=np.float32)))
+    baseline = TinyModel(2, 2, 1)
+    model = TinyModel(2, 2, 1)
     model.load_state_dict(baseline.state_dict())
     def run(model):
         optimizer = torch.optim.SGD(model.parameters(), lr=.01)

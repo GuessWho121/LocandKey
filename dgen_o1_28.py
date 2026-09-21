@@ -18,6 +18,7 @@ import glob
 import json
 import os
 import sys
+import time
 import zipfile
 
 import numpy as np
@@ -34,6 +35,7 @@ SCENARIOS = [
     "o1_28",
     "city_4_phoenix_28",
     "city_16_sanfrancisco_28",
+    "city_17_seattle_28",
     "asu_campus_3p5",
     "i1_2p4",
 ]
@@ -207,9 +209,18 @@ def load_deepmimo_dataset(dm, scenario, root_dir, max_samples, tx_idx=0, rx_indi
         scenario_dir = os.path.join(root_dir, "deepmimo_scenarios", scenario)
         zip_path = os.path.join(root_dir, "deepmimo_scenarios", f"{scenario}_downloaded.zip")
         if not os.path.isdir(scenario_dir):
-            if os.path.exists(zip_path) and not zipfile.is_zipfile(zip_path):
-                raise RuntimeError(f"Bad partial download at {zip_path}. Delete it, then retry.")
-            dm.download(scenario)
+            for attempt in range(3):
+                if os.path.exists(zip_path) and not zipfile.is_zipfile(zip_path):
+                    os.remove(zip_path)
+                try:
+                    dm.download(scenario)
+                except Exception as error:
+                    print(f"Download attempt {attempt + 1}/3 failed: {error}")
+                if os.path.isdir(scenario_dir):
+                    break
+                if attempt < 2:
+                    print("Retrying scenario download in 10 seconds...")
+                    time.sleep(10)
         if not os.path.isdir(scenario_dir):
             raise FileNotFoundError(
                 f"Scenario folder not found after download: {scenario_dir}. "

@@ -11,8 +11,8 @@ The implemented pipeline is:
 1. Validate scenario arrays and create deterministic train, validation, and test indices.
 2. Load only the required samples from memory-mapped NumPy arrays.
 3. Normalize each complex CSI sample to unit energy.
-4. Add complex additive white Gaussian noise (AWGN) at a controlled SNR.
-5. Reconstruct clean CSI with a compact attention-gated ConvNeXt U-Net.
+4. Add complex Gaussian noise at a controlled SNR, optionally correlated across neighboring subcarriers.
+5. Predict a bounded residual correction with a compact attention-gated ConvNeXt U-Net.
 6. Evaluate reconstruction error and correlation on untouched test indices.
 
 The model input and output both have shape `(N, 2, 128, 256)`:
@@ -96,7 +96,9 @@ The skips preserve high-resolution channel detail that could be lost during down
 
 ### Output Layer
 
-The final decoder stage upsamples to `128 x 256`, reduces the representation to 16 channels, and uses a `1 x 1` convolution to produce two output channels. These are interpreted as the reconstructed real and imaginary CSI components.
+The final decoder stage upsamples to `128 x 256`, reduces the representation to 16 channels, and uses a zero-initialized `1 x 1` convolution to predict a two-channel correction. The model adds this correction to the noisy input, so a new model starts as the identity function instead of inventing a channel estimate.
+
+The requested SNR bounds the correction energy. During evaluation, a non-finite or implausibly large correction is rejected and the noisy input is returned unchanged. This is a conservative safety fallback, not a guarantee that every accepted correction improves an unknown clean target.
 
 The final reconstruction and loss calculation remain in float32 even when mixed-precision training is enabled. This avoids unnecessary precision loss in the values used to calculate NMSE.
 
@@ -110,6 +112,7 @@ The architecture was selected as a practical balance for this dataset and the av
 - **Attention-gated skips:** retain high-resolution structure while filtering noisy skip features.
 - **Channel attention:** allows adaptive emphasis of latent feature types.
 - **Compact size:** roughly two million parameters fits comfortably on Kaggle T4 GPUs and is proportionate to the available data.
+- **Residual identity path:** protects recognizable unseen structure and makes doing nothing the initial behavior.
 
 The choice is an engineering rationale, not a claim that every alternative was experimentally defeated. A controlled architecture ablation has not yet been completed.
 
@@ -149,7 +152,7 @@ The scenario set provides several useful kinds of variation:
 
 The exact ray-tracing and antenna-generation settings should be read from the source dataset generation configuration. The labels above describe what is encoded in the scenario names and should not be treated as a complete propagation specification.
 
-The baseline split includes samples from every scenario in train, validation, and test. It measures performance on unseen samples from known scenario distributions. A separate Phoenix holdout experiment excludes Phoenix from model fitting to measure transfer to an unseen city; its results are intentionally omitted until that experiment is complete.
+The baseline split includes samples from every scenario in train, validation, and test. It measures performance on unseen samples from known scenario distributions. A completed Phoenix holdout excluded all 13,489 Phoenix samples from fitting. It gained only `0.98 dB` at 0 dB SNR and worsened the input by `8.93 dB` at 10 dB SNR, showing that the direct-output baseline did not generalize to the unseen city. Phoenix is now frozen as report-only evidence; current development uses San Francisco as a separate holdout.
 
 ## Preprocessing Pipeline
 
@@ -195,7 +198,7 @@ This removes absolute scale as a shortcut and asks the network to learn channel 
 
 ### 5. On-the-fly complex AWGN
 
-Noise is generated while batches are assembled rather than saved as separate arrays. For target SNR `s` in decibels, the linear ratio is `10^(s/10)`. Equal independent Gaussian noise is added to the real and imaginary components, with the total complex noise power set from that ratio.
+Noise is generated while batches are assembled rather than saved as separate arrays. For target SNR `s` in decibels, the linear ratio is `10^(s/10)`. Gaussian noise is added to the real and imaginary components and normalized to the requested total complex-noise power. Training can add one-lag frequency correlation up to `0.5`; validation remains white and deterministic.
 
 This approach:
 
@@ -205,6 +208,8 @@ This approach:
 - remains reproducible through deterministic seeds.
 
 Training SNR is sampled independently per example from a uniform range of **-10 dB to 30 dB**. This teaches one model to handle both severe and mild noise. Validation uses a fixed **10 dB** SNR so epoch-to-epoch model selection is comparable.
+
+Training also applies a random global complex phase rotation to each clean sample before adding noise. The target and its noisy observation receive the same rotation, preserving the physical reconstruction task while reducing dependence on scenario-specific absolute phase.
 
 ### 6. Deterministic epoch and batch generation
 
@@ -253,6 +258,9 @@ The verified baseline was trained on two Tesla T4 GPUs using PyTorch Distributed
 | Seed | 42 |
 | Training SNR | Uniform from -10 to 30 dB per sample |
 | Validation SNR | Fixed at 10 dB |
+| Global phase augmentation | Uniform from `-pi` to `pi` during training |
+| Maximum training noise correlation | `0.5` across neighboring subcarriers |
+| Residual safety factor | `2.0` times expected noise norm |
 | Model selection | Lowest validation NMSE in linear space |
 
 DDP is used instead of `DataParallel` because each GPU owns a separate training process and a disjoint sampler shard. This avoided the large host-memory growth observed with the earlier `DataParallel` implementation and uses both Kaggle GPUs effectively.
@@ -270,9 +278,9 @@ Evaluation reports the following for each scenario and for the overall test set:
 
 The untouched baseline test set contains 14,024 samples. It was evaluated at nine SNRs from -10 dB through 30 dB, producing five scenario rows plus one overall row at every SNR.
 
-## Verified Baseline Results
+## Verified Legacy Baseline Results
 
-The best checkpoint was selected at epoch 59 of the 60-epoch run. The full test evaluation completed with finite metrics and the original split fingerprint.
+These results belong to the earlier direct-output model trained with all five scenarios. The best checkpoint was selected at epoch 59 of the 60-epoch run. The full test evaluation completed with finite metrics and the original split fingerprint. The residual model must be reported separately after its new holdout run completes.
 
 | Input SNR | Noisy input NMSE | Model NMSE | NMSE gain | Approximate error-energy reduction |
 | ---: | ---: | ---: | ---: | ---: |
@@ -346,6 +354,7 @@ For the two-GPU Kaggle workflow, bundle creation, smoke testing, DDP launch, res
 - Simulated channel data cannot fully represent hardware impairments, mobility, calibration error, or real deployment drift.
 - A fixed 10 dB validation condition may favor a checkpoint that is not optimal at every SNR.
 - The current repository reconstructs CSI; it does not yet implement a secure key-establishment protocol.
+- The residual/SNR-safe model is under San Francisco holdout evaluation and must not inherit the legacy baseline's reported scores.
 
 ## Future Work
 

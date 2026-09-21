@@ -30,6 +30,9 @@ def parse_args():
     parser.add_argument("--max-samples-per-scenario", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--baseline-weights", help="Re-evaluate the original model on identical samples and noise.")
+    parser.add_argument("--baseline-legacy-direct", action="store_true",
+                        help="Interpret baseline weights as the pre-residual direct-output architecture.")
+    parser.add_argument("--safety-factor", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -144,9 +147,10 @@ def evaluate_indices(model, baseline, channel, indices, args, device, snr_positi
         noisy = add_awgn(clean, np.full(len(clean), snr_db), rng)
         with torch.inference_mode():
             inputs = torch.from_numpy(noisy).permute(0, 3, 1, 2).to(device)
+            snr = torch.full((len(inputs),), float(snr_db), device=device)
             for network, target in ((model, totals), (baseline, baseline_totals)):
                 if network is not None:
-                    prediction = network(inputs).permute(0, 2, 3, 1).cpu().numpy()
+                    prediction = network(inputs, snr).permute(0, 2, 3, 1).cpu().numpy()
                     if not np.isfinite(prediction).all():
                         raise ValueError(f"Non-finite prediction at {snr_db:g} dB")
                     accumulate(target, clean, noisy, prediction)
@@ -169,8 +173,8 @@ def holdout_decisions(unseen, comparisons):
 
 def main():
     args = parse_args()
-    if args.batch_size <= 0:
-        raise SystemExit("--batch-size must be positive")
+    if args.batch_size <= 0 or args.safety_factor <= 0:
+        raise SystemExit("--batch-size and --safety-factor must be positive")
     if not os.path.isfile(args.weights_path):
         raise FileNotFoundError(f"Weights not found: {args.weights_path}")
 
@@ -180,7 +184,7 @@ def main():
         raise SystemExit("TensorFlow .h5 weights are incompatible; train a PyTorch .pt checkpoint first")
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_resonance_model((128, 256, 2)).to(device)
+    model = build_resonance_model((128, 256, 2), safety_factor=args.safety_factor).to(device)
     model.load_state_dict(torch.load(args.weights_path, map_location=device, weights_only=True))
     model.eval()
     print(f"Device: {device}")
@@ -190,7 +194,9 @@ def main():
         raise SystemExit("Use a separate --output-dir for holdout evaluation")
     baseline = None
     if args.baseline_weights:
-        baseline = build_resonance_model((128, 256, 2)).to(device)
+        baseline = build_resonance_model(
+            (128, 256, 2), residual=not args.baseline_legacy_direct,
+            safety_factor=args.safety_factor).to(device)
         baseline.load_state_dict(torch.load(args.baseline_weights, map_location=device, weights_only=True))
         baseline.eval()
     rows = []

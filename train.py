@@ -39,6 +39,10 @@ def parse_args():
     parser.add_argument("--snr-min-db", type=float, default=-10.0)
     parser.add_argument("--snr-max-db", type=float, default=30.0)
     parser.add_argument("--validation-snr-db", type=float, default=10.0)
+    parser.add_argument("--max-noise-correlation", type=float, default=0.5)
+    parser.add_argument("--safety-factor", type=float, default=2.0)
+    parser.add_argument("--no-phase-augmentation", dest="phase_augmentation", action="store_false")
+    parser.set_defaults(phase_augmentation=True)
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-val-samples", type=int)
     parser.add_argument("--seed", type=int, default=42)
@@ -59,20 +63,22 @@ def run_epoch(model, data, device, optimizer=None, scheduler=None, scaler=None):
     progress = tqdm(range(len(data)), desc="Train" if training else "Validation",
                     mininterval=30, disable=rank != 0)
     for index in progress:
-        noisy, clean = data[index]
+        noisy, clean, snr_db = data[index]
         global_count = len(clean)
         local_count = len(clean[rank::world])
         # Empty ranks still participate in DDP backward, with zero loss weight.
         noisy, clean = ((noisy[rank::world], clean[rank::world]) if local_count
                         else (noisy[:1], clean[:1]))
+        snr_db = snr_db[rank::world] if local_count else snr_db[:1]
         inputs = torch.from_numpy(noisy).permute(0, 3, 1, 2).to(device)
         targets = torch.from_numpy(clean).permute(0, 3, 1, 2).to(device)
+        snr = torch.from_numpy(snr_db).to(device)
         if training:
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
             with torch.autocast(device_type=device.type, dtype=torch.float16,
                                 enabled=scaler is not None and scaler.is_enabled()):
-                prediction = model(inputs)
+                prediction = model(inputs, snr)
             loss = loss_fn(targets, prediction)
             finite = torch.isfinite(loss).to(torch.int32)
             if distributed:
@@ -114,12 +120,13 @@ def main():
     if args.resume:
         path = args.weights_path + ".last.pt" if args.resume == "auto" else args.resume
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if checkpoint.get("version") != 1:
-            raise SystemExit("This is not a full checkpoint. Use --init-weights for old weights-only files.")
+        if checkpoint.get("version") != 2:
+            raise SystemExit("This checkpoint predates residual/SNR-safe training and cannot be resumed")
         # Restore the original schedule and data settings; output paths may move between laptops.
         for key in ("epochs", "batch_size", "patience", "learning_rate", "min_learning_rate",
                     "snr_min_db", "snr_max_db", "validation_snr_db", "max_train_samples",
-                    "max_val_samples", "seed", "mixed_precision"):
+                    "max_val_samples", "max_noise_correlation", "safety_factor",
+                    "phase_augmentation", "seed", "mixed_precision"):
             setattr(args, key, checkpoint["config"][key])
         if args.smoke:
             raise SystemExit("Resume smoke runs with explicit checkpoint/output paths, without --smoke")
@@ -127,7 +134,9 @@ def main():
         raise SystemExit("--batch-size and --epochs must be positive")
     if args.snr_min_db >= args.snr_max_db:
         raise SystemExit("--snr-min-db must be lower than --snr-max-db")
-    if args.patience < 0 or not 0 <= args.min_learning_rate <= args.learning_rate or args.learning_rate <= 0:
+    if (args.patience < 0 or not 0 <= args.min_learning_rate <= args.learning_rate
+            or args.learning_rate <= 0 or not 0 <= args.max_noise_correlation < 1
+            or args.safety_factor <= 0):
         raise SystemExit("Invalid patience or learning-rate range")
     if args.weights_path.endswith(".h5"):
         raise SystemExit("Use a .pt weights path; TensorFlow .h5 weights are incompatible")
@@ -164,6 +173,8 @@ def main():
         args.data_root, args.split_dir, "train", args.batch_size,
         seed=args.seed, shuffle=True, snr_min_db=args.snr_min_db,
         snr_max_db=args.snr_max_db, max_samples=args.max_train_samples,
+        phase_augmentation=args.phase_augmentation,
+        max_noise_correlation=args.max_noise_correlation,
     )
     validation_data = make_csi_sequence(
         args.data_root, args.split_dir, "validation", args.batch_size,
@@ -173,7 +184,7 @@ def main():
     print(f"Training samples: {len(train_data.references):,}")
     print(f"Validation samples: {len(validation_data.references):,} at {args.validation_snr_db:g} dB")
 
-    model = build_resonance_model((128, 256, 2)).to(device)
+    model = build_resonance_model((128, 256, 2), safety_factor=args.safety_factor).to(device)
     train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
                    if world > 1 else model)
     if primary and world > 1:
@@ -257,7 +268,7 @@ def main():
             numpy_rng = np.random.get_state()
             if primary:
                 torch.save({
-                "version": 1, "config": vars(args), "next_epoch": epoch + 1, "split_sha256": fingerprint,
+                "version": 2, "config": vars(args), "next_epoch": epoch + 1, "split_sha256": fingerprint,
                 "model": model.state_dict(), "best_model": best_state,
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(), "best_nmse": float(best_nmse), "stale_epochs": stale_epochs,

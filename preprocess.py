@@ -196,17 +196,31 @@ def normalize_batch(batch):
     return batch / np.maximum(norm, np.float32(1e-10))
 
 
-def add_awgn(batch, snr_db, rng):
+def rotate_global_phase(batch, phase):
+    phase = np.asarray(phase, dtype=np.float32).reshape(-1, 1, 1)
+    real, imag = batch[..., 0], batch[..., 1]
+    cosine, sine = np.cos(phase), np.sin(phase)
+    return np.stack((real * cosine - imag * sine, real * sine + imag * cosine), axis=-1)
+
+
+def add_awgn(batch, snr_db, rng, correlation=0.0):
     snr_db = np.asarray(snr_db, dtype=np.float32).reshape(-1, 1, 1, 1)
     power = np.mean(batch[..., 0] ** 2 + batch[..., 1] ** 2, axis=(1, 2), keepdims=True)[..., None]
-    noise_std = np.sqrt(power / (2.0 * np.power(10.0, snr_db / 10.0)))
-    noise = rng.normal(size=batch.shape).astype(np.float32) * noise_std.astype(np.float32)
+    noise = rng.normal(size=batch.shape).astype(np.float32)
+    correlation = np.asarray(correlation, dtype=np.float32).reshape(-1, 1, 1, 1)
+    if np.any(correlation):
+        noise[:, :, 1:, :] += correlation * noise[:, :, :-1, :]
+    target_power = power / np.power(10.0, snr_db / 10.0)
+    noise_power = np.mean(noise[..., 0] ** 2 + noise[..., 1] ** 2, axis=(1, 2), keepdims=True)[..., None]
+    noise *= np.sqrt(target_power / np.maximum(noise_power, np.float32(1e-20))).astype(np.float32)
     return batch + noise
 
 
 def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=False,
-                      snr_min_db=-10.0, snr_max_db=30.0, fixed_snr_db=None, max_samples=None):
-    if batch_size <= 0 or (max_samples is not None and max_samples <= 0):
+                      snr_min_db=-10.0, snr_max_db=30.0, fixed_snr_db=None, max_samples=None,
+                      phase_augmentation=False, max_noise_correlation=0.0):
+    if (batch_size <= 0 or (max_samples is not None and max_samples <= 0)
+            or not 0 <= max_noise_correlation < 1):
         raise ValueError("batch_size and max_samples must be positive")
 
     summary, indices_file, channels = load_split_files(data_root, split_dir)
@@ -253,9 +267,13 @@ def make_csi_sequence(data_root, split_dir, split, batch_size, seed=42, shuffle=
             clean = normalize_batch(clean)
             noise_epoch = self.epoch if fixed_snr_db is None else 0
             rng = np.random.default_rng(self.seed + noise_epoch * 1_000_003 + batch_number)
+            if phase_augmentation:
+                clean = rotate_global_phase(clean, rng.uniform(-np.pi, np.pi, len(clean)))
             snr = (rng.uniform(snr_min_db, snr_max_db, len(clean)) if fixed_snr_db is None
                    else np.full(len(clean), fixed_snr_db))
-            return add_awgn(clean, snr, rng), clean
+            correlation = (rng.uniform(0, max_noise_correlation, len(clean))
+                           if max_noise_correlation else 0.0)
+            return add_awgn(clean, snr, rng, correlation), clean, np.asarray(snr, dtype=np.float32)
 
         def on_epoch_end(self):
             self.epoch += 1

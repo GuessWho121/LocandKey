@@ -13,7 +13,8 @@ import numpy as np
 import torch
 
 from model import build_resonance_model, nmse_metric, resonance_loss
-from preprocess import create_splits, create_holdout_splits, make_csi_sequence, split_fingerprint
+from preprocess import (add_awgn, create_splits, create_holdout_splits, make_csi_sequence,
+                        rotate_global_phase, split_fingerprint)
 from eval import holdout_decisions
 
 
@@ -32,10 +33,15 @@ def main():
         splits = work / "splits"
         create_splits(str(work), str(splits))
         data = make_csi_sequence(str(work), str(splits), "validation", 1, fixed_snr_db=10)
-        noisy, clean = data[0]
+        noisy, clean, snr = data[0]
         data.on_epoch_end()
         np.testing.assert_array_equal(noisy, data[0][0])
+        np.testing.assert_array_equal(snr, np.array([10], dtype=np.float32))
         np.testing.assert_allclose(np.sum(clean * clean), 1, rtol=1e-5)
+        rotated = rotate_global_phase(clean, np.array([np.pi / 2], dtype=np.float32))
+        np.testing.assert_allclose(np.sum(rotated * rotated), 1, rtol=1e-5)
+        correlated = add_awgn(clean, snr, np.random.default_rng(1), correlation=0.5)
+        np.testing.assert_allclose(np.sum((correlated - clean) ** 2), 0.1, rtol=1e-5)
         target = torch.from_numpy(clean).permute(0, 3, 1, 2)
         prediction = target * 0.5
         expected = np.mean((clean - clean * 0.5) ** 2) / (np.mean(clean ** 2) + 1e-8)
@@ -44,8 +50,8 @@ def main():
         for channel in data.channels.values():
             channel._mmap.close()
         model = build_resonance_model()
-        output = model(target)
-        assert output.shape == target.shape and output.dtype == torch.float32
+        output = model(target, torch.from_numpy(snr))
+        assert output.shape == target.shape and output.dtype == torch.float32 and torch.equal(output, target)
         resonance_loss()(target, output).backward()
         assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
         weights = work / "test.pt"
