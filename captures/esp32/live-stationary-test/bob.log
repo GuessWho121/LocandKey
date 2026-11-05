@@ -1,0 +1,148 @@
+ets Jul 29 2019 12:21:46
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:1
+load:0x3fff0030,len:4876
+ho 0 tail 12 room 4
+load:0x40078000,len:16560
+load:0x40080400,len:3500
+entry 0x400805b4
+READY role=bob boot=90
+STATUS role=bob boot=90 last_seq=1 remaining=0 wifi=0 channel=6
+ACCEPT boot=109 seq=1 uptime_ms=1927
+ACCEPT boot=109 seq=2 uptime_ms=2427
+ACCEPT boot=109 seq=3 uptime_ms=2927
+ACCEPT boot=109 seq=4 uptime_ms=3427
+ACCEPT boot=109 seq=5 uptime_ms=3927
+ACCEPT boot=109 seq=6 uptime_ms=4427
+ACCEPT boot=109 seq=7 uptime_ms=4927
+ACCEPT boot=109 seq=8 uptime_ms=5427
+ACCEPT boot=109 seq=9 uptime_ms=5927
+ACCEPT boot=109 seq=10 uptime_ms=6427
+ACCEPT boot=109 seq=11 uptime_ms=6927
+ACCEPT boot=109 seq=12 uptime_ms=7427
+ACCEPT boot=109 seq=13 uptime_ms=7927
+ACCEPT boot=109 seq=14 uptime_ms=8427
+ACCEPT boot=109 seq=15 uptime_ms=8927
+ACCEPT boot=109 seq=16 uptime_ms=9427
+ACCEPT boot=109 seq=17 uptime_ms=9927
+ACCEPT boot=109 seq=18 uptime_ms=10427
+ACCEPT boot=109 seq=19 uptime_ms=10927
+ACCEPT boot=109 seq=20 uptime_ms=11427
+ACCEPT boot=109 seq=21 uptime_ms=11927
+ACCEPT boot=109 seq=22 uptime_ms=12427
+ACCEPT boot=109 seq=23 uptime_ms=12927
+ACCEPT boot=109 seq=24 uptime_ms=13427
+ACCEPT boot=109 seq=25 uptime_ms=13927
+ACCEPT boot=109 seq=26 uptime_ms=14427
+ACCEPT boot=109 seq=27 uptime_ms=14927
+ACCEPT boot=109 seq=28 uptime_ms=15427
+ACCEPT boot=109 seq=29 uptime_ms=15927
+ACCEPT boot=109 seq=30 uptime_ms=16427
+ACCEPT boot=109 seq=31 uptime_ms=16927
+ACCEPT boot=109 seq=32 uptime_ms=17427
+ACCEPT boot=109 seq=33 uptime_ms=17927
+ACCEPT boot=109 seq=34 uptime_ms=18427
+ACCEPT boot=109 seq=35 uptime_ms=18927
+ACCEPT boot=109 seq=36 uptime_ms=19427
+ACCEPT boot=109 seq=37 uptime_ms=19927
+ACCEPT boot=109 seq=38 uptime_ms=20427
+????????????????????????????????????????????????????????????????=20927
+ACCEPT boot=109 seq=40 uptime_ms=21427
+ACCEPT boot=109 seq=41 uptime_ms=21927
+ACCEPT boot=109 seq=42 uptime_ms=22427
+ACCEPT boot=109 seq=43 uptime_ms=22927
+ACCEPT boot=109 seq=44 uptime_ms=23427
+ACCEPT boot=109 seq=45 uptime_ms=23927
+ACCEPT boot=109 seq=46 uptime_ms=24427
+ACCEPT boot=109 seq=47 uptime_ms=24927
+ACCEPT boot=109 seq=48 uptime_ms=25427
+ACCEPT boot=109 seq=49 uptime_ms=25927
+ACCEPT boot=109 seq=50 uptime_ms=26427
+ACCEPT boot=109 seq=51 uptime_ms=26927
+ACCEPT boot=109 seq=52 uptime_ms=27427
+ACCEPT boot=109 seq=53 uptime_ms=27927
+ACCEPT boot=109 seq=54 uptime_ms=28427
+ACCEPT boot=109 seq=55 uptime_ms=28927
+ACCEPT boot=109 seq=56 uptime_ms=29427
+ACCEPT boot=109 seq=57 uptime_ms=29927
+ACCEPT boot=109 seq=58 uptime_ms=30427
+ACCEPT boot=109 seq=59 uptime_ms=30927
+ACCEPT boot=109 seq=60 uptime_ms=31427
+ACCEPT boot=109 seq=61 uptime_ms=31927
+ACCEPT boot=109 seq=62 uptime_ms=32427
+ACCEPT boot=109 seq=63 uptime_ms=32927
+ACCEPT boot=109 seq=64 uptime_ms=33427
+ACCEPT boot=109 seq=65 uptime_ms=33927
+ACCEPT boot=109 seq=66 uptime_ms=34427
+ACCEPT boot=109 seq=67 uptime_ms=34927
+ACCEPT boot=109 seq=68 uptime_ms=35427
+ACCEPT boot=109 seq=69 uptime_ms=35927
+ACCEPT boot=109 seq=70 uptime_ms=36427
+ACCEPT boot=109 seq=71 uptime_ms=36927
+ACCEPT boot=109 seq=72 uptime_ms=37427
+ACCEPT boot=109 seq=73 uptime_ms=37927
+ACCEPT boot=109 seq=74 uptime_ms=38427
+ACCEPT boot=109 seq=75 uptime_ms=38927
+ACCEPT boot=109 seq=76 uptime_ms=39427
+ACCEPT boot=109 seq=77 uptime_ms=39927
+ACCEPT boot=109 seq=78 uptime_ms=40427
+ACCEPT boot=109 seq=79 uptime_ms=40927
+ACCEPT boot=109 seq=80 uptime_ms=41427
+ACCEPT boot=109 seq=81 uptime_ms=41927
+ACCEPT boot=109 seq=82 uptime_ms=42427
+ACCEPT boot=109 seq=83 uptime_ms=42927
+ACCEPT boot=109 seq=84 uptime_ms=43427
+ACCEPT boot=109 seq=85 uptime_ms=43927
+ACCEPT boot=109 seq=86 uptime_ms=44427
+ACCEPT boot=109 seq=87 uptime_ms=44927
+ACCEPT boot=109 seq=88 uptime_ms=45427
+ACCEPT boot=109 seq=89 uptime_ms=45927
+ACCEPT boot=109 seq=90 uptime_ms=46427
+ACCEPT boot=109 seq=91 uptime_ms=46927
+ACCEPT boot=109 seq=92 uptime_ms=47427
+ACCEPT boot=109 seq=93 uptime_ms=47927
+ACCEPT boot=109 seq=94 uptime_ms=48427
+ACCEPT boot=109 seq=95 uptime_ms=48927
+ACCEPT boot=109 seq=96 uptime_ms=49427
+ACCEPT boot=109 seq=97 uptime_ms=49927
+ACCEPT boot=109 seq=98 uptime_ms=50427
+ACCEPT boot=109 seq=99 uptime_ms=50927
+ACCEPT boot=109 seq=100 uptime_ms=51427
+ACCEPT boot=109 seq=101 uptime_ms=51927
+ACCEPT boot=109 seq=102 uptime_ms=52427
+ACCEPT boot=109 seq=103 uptime_ms=52927
+ACCEPT boot=109 seq=104 uptime_ms=53427
+ACCEPT boot=109 seq=105 uptime_ms=53927
+ACCEPT boot=109 seq=106 uptime_ms=54427
+ACCEPT boot=109 seq=107 uptime_ms=54927
+ACCEPT boot=109 seq=108 uptime_ms=55427
+ACCEPT boot=109 seq=109 uptime_ms=55927
+ACCEPT boot=109 seq=110 uptime_ms=56427
+ACCEPT boot=109 seq=111 uptime_ms=56927
+ACCEPT boot=109 seq=112 uptime_ms=57427
+ACCEPT boot=109 seq=113 uptime_ms=57927
+ACCEPT boot=109 seq=114 uptime_ms=58427
+ACCEPT boot=109 seq=115 uptime_ms=58927
+ACCEPT boot=109 seq=116 uptime_ms=59427
+ACCEPT boot=109 seq=117 uptime_ms=59927
+ACCEPT boot=109 seq=118 uptime_ms=60427
+ACCEPT boot=109 seq=119 uptime_ms=60927
+ACCEPT boot=109 seq=120 uptime_ms=61427
+REJECT replay boot=109 seq=120
+REJECT tamper boot=109 seq=120
+REBOOTING
+ets Jul 29 2019 12:21:46
+rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:1
+load:0x3fff0030,len:4876
+ho 0 tail 12 room 4
+load:0x40078000,len:16560
+load:0x40080400,len:3500
+entry 0x400805b4
+READY role=bob boot=109
+REJECT replay boot=109 seq=120
+ACCEPT boot=110 seq=1 uptime_ms=620

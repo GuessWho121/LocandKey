@@ -24,3 +24,19 @@ __pycache__/
 kaggle/bundle/
 kaggle/holdout/bundle/
 kaggle-output/
+
+# Build outputs
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+output/hardware/build/
+tmp/pdfs/*.png
+!tmp/pdfs/logo.png
+tmp/test_eval_phys/
+*.o
+
+# Agent instructions & tool ignore
+AGENTS.md
+*agents.md
+GEMINI.md
+.agents/
+.ignore

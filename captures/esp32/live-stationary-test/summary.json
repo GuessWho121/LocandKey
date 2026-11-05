@@ -1,0 +1,15 @@
+{
+    "accepted_readings":  120,
+    "duplicate_accepted":  0,
+    "rejected_replays":  2,
+    "rejected_tamper":  1,
+    "physical_power_cycle_observed":  false,
+    "stored_state_restored":  false,
+    "power_cycle_replay_rejected":  false,
+    "sender_boot_advanced":  true,
+    "hotspot_ssid":  "",
+    "hotspot_channel":  0,
+    "alice_ip":  "",
+    "bob_ip":  "",
+    "passed":  true
+}
